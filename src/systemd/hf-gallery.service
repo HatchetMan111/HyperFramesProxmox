@@ -1,0 +1,14 @@
+[Unit]
+Description=Render-Galerie (FileBrowser)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=hyperframes
+WorkingDirectory=/opt/hyperframes
+ExecStart=/usr/local/bin/filebrowser --address 0.0.0.0 --port 3101 --root /opt/hyperframes/gallery --database /opt/hyperframes/filebrowser.db
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=hyperframes-suite.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=Hyperframes Studio (Preview, nur localhost)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=hyperframes
+WorkingDirectory=/opt/hyperframes/studio-home
+ExecStart=/usr/bin/hyperframes preview /opt/hyperframes/studio-home --port 3002 --no-open --foreground
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=hyperframes-suite.target

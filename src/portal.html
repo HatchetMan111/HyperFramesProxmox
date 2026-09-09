@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="de">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hyperframes-Suite</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#101010;color:#fff;max-width:720px;margin:60px auto;padding:0 20px}
+h1{color:#FFD234}.card{background:#1e1e1e;border:2px solid #7ED957;border-radius:14px;padding:18px;margin:14px 0}
+.card b{font-size:19px;color:#FFD234}.card p{margin:6px 0 10px;color:#ddd}
+a.btn{display:inline-block;background:#14532D;color:#FFD234;font-weight:700;padding:10px 22px;border-radius:10px;text-decoration:none}
+small{color:#888}
+</style></head><body>
+<h1>🎬 Hyperframes-Suite</h1>
+<p>Lokal rendern · im Browser nacharbeiten · KI optional zuschalten.</p>
+<div class="card"><b>1 · Job-UI — Prompt → Video</b>
+<p>Storyboard + Entwurf per OpenRouter oder OmniRoute (anklickbar), dann rendern.</p>
+<a class="btn" data-port="3120" href="#">Öffnen</a></div>
+<div class="card"><b>2 · Studio — Vorschau &amp; Nacharbeiten</b>
+<p>Kompositionen live sehen, Elemente wählen, Timeline prüfen.</p>
+<a class="btn" data-port="3100" href="#">Öffnen</a></div>
+<div class="card"><b>3 · Galerie — Ergebnisse laden</b>
+<p>Fertige MP4s herunterladen, eigene Dateien hochladen.</p>
+<a class="btn" data-port="3101" href="#">Öffnen</a></div>
+<div class="card"><b>4 · OmniRoute — KI-Gateway</b>
+<p>Lokaler Endpoint mit Free-Tiers: <small><code>/v1</code> (OpenAI-kompatibel)</small></p>
+<a class="btn" data-port="20128" href="#">Öffnen</a></div>
+<script>
+document.querySelectorAll("a[data-port]").forEach(a=>{
+  a.href = location.protocol+"//"+location.hostname+":"+a.dataset.port+"/";
+});
+</script>
+</body></html>

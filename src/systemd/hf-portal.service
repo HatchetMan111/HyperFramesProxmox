@@ -1,0 +1,14 @@
+[Unit]
+Description=Hyperframes-Suite Portal (Einstiegsseite)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=hyperframes
+WorkingDirectory=/opt/hyperframes/portal
+ExecStart=/usr/bin/python3 -m http.server 8080 --directory /opt/hyperframes/portal
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=hyperframes-suite.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=Hyperframes-Suite (alle Dienste)
+Wants=hf-studio.service hf-studio-bridge.service hf-gallery.service omniroute.service hf-jobs.service hf-portal.service
+
+[Install]
+WantedBy=multi-user.target

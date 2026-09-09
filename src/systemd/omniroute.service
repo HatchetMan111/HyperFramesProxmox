@@ -1,0 +1,15 @@
+[Unit]
+Description=OmniRoute AI-Gateway (lokal, Free-Tiers)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=hyperframes
+WorkingDirectory=/opt/hyperframes
+Environment=PORT=20128
+ExecStart=/usr/bin/omniroute
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=hyperframes-suite.target
