@@ -37,9 +37,10 @@ msg_info()  { echo -e "${YW}▶ $*${CL}"; }
 msg_ok()    { echo -e "${GN}✔ $*${CL}"; }
 msg_error() { echo -e "${RD}✘ $*${CL}"; }
 
-# Komplette Fehlerkette bei Abbruch: Befehl, Exit-Code, Log-Auszug, Journal-Hinweis
+# Komplette Fehlerkette bei Abbruch (Befehl gekürzt — kein 200-Zeilen-Dump)
 # shellcheck disable=SC2154  # ec wird im trap zugewiesen
-trap 'ec=$?; msg_error "Abbruch (Exit $ec) beim Befehl: $BASH_COMMAND";
+trap 'ec=$?; msg_error "Abbruch (Exit $ec)";
+  echo "Befehl (Anfang): ${BASH_COMMAND:0:200}";
   echo "--- letzte 30 Logzeilen ($LOG) ---"; tail -n 30 "$LOG" 2>/dev/null || true;
   echo "--- Tipp: Einzeiler mit DEBUG=1 davor setzen für bash -x ---";
   echo "--- CT-Logs: pct exec $CT_ID -- journalctl -n 50 ---";
@@ -117,7 +118,7 @@ pct exec "$CT_ID" -- env REPO_RAW="$REPO_RAW" \
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive PATH="/usr/local/bin:$PATH"
 echo "==> [CT] Basis"
-apt-get update && apt-get install -y curl git ffmpeg python3 socat ufw ca-certificates gnupg openssl sudo locales iproute2
+apt-get update && apt-get install -y curl git ffmpeg python3 socat ufw ca-certificates gnupg openssl sudo locales iproute2 unzip
 sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen 2>/dev/null || echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
 locale-gen en_US.UTF-8 >/dev/null 2>&1 || true
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
@@ -145,12 +146,36 @@ done
 cp "$BASE/portal.html" "$BASE/portal/index.html"
 [ -f "$BASE/.env" ] || { cp "$BASE/env.example" "$BASE/.env"; sed -i "s/^JOB_TOKEN=.*/JOB_TOKEN=$(openssl rand -hex 16)/" "$BASE/.env"; }
 chmod 600 "$BASE/.env"; chown -R hyperframes:hyperframes "$BASE" "$HDIR"
-echo "==> [CT] Chrome + Doctor (Download ~115 MB — je nach Leitung mehrere Minuten, bitte warten)"
-if ! timeout 1500 sudo -u hyperframes hyperframes browser ensure; then
-  echo "FEHLER: Chrome-Setup nach 25 Min. ohne Erfolg (Netz? Platte voll?)."
-  echo "Manuell fortsetzen im CT: sudo -u hyperframes hyperframes browser ensure"
-  echo "Cache prüfen im CT: du -sh /home/hyperframes/.cache/hyperframes/chrome/"
-  exit 1
+echo "==> [CT] Chrome + Doctor (Download ~115 MB + Entpacken — Fortschritt unten, bitte warten)"
+df -h / | tail -n 1
+CHROME_BIN="$(sudo -u hyperframes hyperframes browser path 2>/dev/null || true)"
+if [ -n "$CHROME_BIN" ] && [ -x "$CHROME_BIN" ]; then
+  echo "Chrome bereits vorhanden ($CHROME_BIN) — Download übersprungen"
+else
+  rm -f /tmp/chrome-ensure.log
+  sudo -u hyperframes bash -c 'hyperframes browser ensure > /tmp/chrome-ensure.log 2>&1' &
+  ENSURE_PID=$!
+  ELAPSED=0
+  while kill -0 "$ENSURE_PID" 2>/dev/null; do
+    sleep 15
+    ELAPSED=$((ELAPSED + 15))
+    SIZE=$(du -sh /home/hyperframes/.cache/hyperframes/chrome 2>/dev/null | cut -f1)
+    [ -n "$SIZE" ] || SIZE="?"
+    echo "  ... Chrome-Setup läuft (${ELAPSED}s, Cache: $SIZE)"
+    if [ "$ELAPSED" -ge 1500 ]; then
+      kill "$ENSURE_PID" 2>/dev/null || true
+      echo "FEHLER: Chrome-Setup nach 25 Min. ohne Erfolg (Netz? Platte voll? unzip fehlt?)."
+      echo "--- letzte 20 Zeilen chrome-ensure.log ---"; tail -n 20 /tmp/chrome-ensure.log 2>/dev/null || echo "(kein Log vorhanden)"
+      exit 1
+    fi
+  done
+  if ! wait "$ENSURE_PID"; then
+    echo "FEHLER: hyperframes browser ensure ist fehlgeschlagen."
+    echo "--- letzte 30 Zeilen chrome-ensure.log ---"; tail -n 30 /tmp/chrome-ensure.log 2>/dev/null || echo "(kein Log vorhanden)"
+    echo "Manuell fortsetzen im CT: sudo -u hyperframes hyperframes browser ensure"
+    exit 1
+  fi
+  echo "Chrome bereit: $(sudo -u hyperframes hyperframes browser path 2>/dev/null)"
 fi
 df -h /dev/shm
 sudo -u hyperframes hyperframes doctor 2>&1 | tail -n 15 || true
