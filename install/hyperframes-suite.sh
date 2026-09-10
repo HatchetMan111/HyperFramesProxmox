@@ -118,7 +118,8 @@ pct exec "$CT_ID" -- env REPO_RAW="$REPO_RAW" \
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive PATH="/usr/local/bin:$PATH"
 echo "==> [CT] Basis"
-apt-get update && apt-get install -y curl git ffmpeg python3 socat ufw ca-certificates gnupg openssl sudo locales iproute2 unzip
+apt-get update && apt-get install -y curl git ffmpeg python3 socat ufw ca-certificates gnupg openssl sudo locales iproute2 unzip \
+  libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2
 sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen 2>/dev/null || echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
 locale-gen en_US.UTF-8 >/dev/null 2>&1 || true
 export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
@@ -177,6 +178,15 @@ else
   fi
   echo "Chrome bereit: $(sudo -u hyperframes hyperframes browser path 2>/dev/null)"
 fi
+echo "==> [CT] Chrome Start-Test (Systembibliotheken prüfen)"
+CHROME_BIN="$(sudo -u hyperframes hyperframes browser path 2>/dev/null)"
+if [ -z "$CHROME_BIN" ] || ! sudo -u hyperframes "$CHROME_BIN" --version >/dev/null 2>&1; then
+  echo "FEHLER: Chrome startet nicht (fehlende Systemlibs?). Ausgabe:"
+  sudo -u hyperframes "$CHROME_BIN" --version 2>&1 | head -n 5 || true
+  echo "Fix: apt-get install -y libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2"
+  exit 1
+fi
+echo "Chrome-Start OK"
 df -h /dev/shm
 sudo -u hyperframes hyperframes doctor 2>&1 | tail -n 15 || true
 echo "==> [CT] Studio-Starterprojekt"
@@ -186,6 +196,15 @@ chown -R hyperframes:hyperframes "$BASE/studio-home"
 [ -f "$BASE/studio-home/index.html" ] || echo "WARNUNG: studio-home/index.html fehlt — Studio startet ggf. leer (Prüfung: ls $BASE/studio-home)"
 echo "==> [CT] Dienste aktivieren"
 cp "$BASE/systemd/"*.service "$BASE/systemd/"*.target /etc/systemd/system/
+echo "==> [CT] OmniRoute-Startform erkennen (serve-Unterbefehl oder Standard-Start)"
+OMNI_BIN="$(command -v omniroute)"
+if "$OMNI_BIN" --help 2>&1 | grep -wq "serve"; then
+  mkdir -p /etc/systemd/system/omniroute.service.d
+  printf '[Service]\nExecStart=\nExecStart=%s serve --port 20128\n' "$OMNI_BIN" > /etc/systemd/system/omniroute.service.d/exec.conf
+  echo "OmniRoute nutzt 'serve'-Modus"
+else
+  echo "OmniRoute nutzt Standard-Start (Port per ENV)"
+fi
 if [ ! -f "$BASE/filebrowser.db" ]; then
   sudo -u hyperframes filebrowser config init --address 0.0.0.0 --port "$PORT_GALLERY" --root "$BASE/gallery" --database "$BASE/filebrowser.db" >/dev/null
   GALPW=$(openssl rand -base64 12); echo "$GALPW" > "$BASE/gallery-pass.txt"; chmod 600 "$BASE/gallery-pass.txt"; chown hyperframes:hyperframes "$BASE/gallery-pass.txt"

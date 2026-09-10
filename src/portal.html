@@ -3,29 +3,44 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hyperframes-Suite</title>
 <style>
-body{font-family:system-ui,sans-serif;background:#101010;color:#fff;max-width:720px;margin:60px auto;padding:0 20px}
-h1{color:#FFD234}.card{background:#1e1e1e;border:2px solid #7ED957;border-radius:14px;padding:18px;margin:14px 0}
-.card b{font-size:19px;color:#FFD234}.card p{margin:6px 0 10px;color:#ddd}
+body{font-family:system-ui,-apple-system,sans-serif;background:#101010;color:#eee;max-width:760px;margin:0 auto;padding:24px 20px 60px}
+h1{color:#FFD234;margin:6px 0}.mut{color:#999;font-size:13px}
+.card{background:#1a1a1a;border:1px solid #333;border-radius:14px;padding:18px;margin:14px 0}
+.card b{font-size:19px;color:#FFD234}.card p{margin:6px 0 10px;color:#ccc}
 a.btn{display:inline-block;background:#14532D;color:#FFD234;font-weight:700;padding:10px 22px;border-radius:10px;text-decoration:none}
+.tok{background:#0d0d0d;border:1px solid #444;border-radius:12px;padding:14px;margin:14px 0}
+.tok input{width:100%;padding:11px;font-size:15px;background:#000;color:#eee;border:1px solid #444;border-radius:9px;box-sizing:border-box}
 small{color:#888}
 </style></head><body>
 <h1>🎬 Hyperframes-Suite</h1>
 <p>Lokal rendern · im Browser nacharbeiten · KI optional zuschalten.</p>
+<div class="tok"><b>Job-UI-Token</b> <span class="mut">(einmal eingeben, bleibt in diesem Browser)</span>
+<input id="tok" type="password" placeholder="JOB_TOKEN aus /opt/hyperframes/.env" autocomplete="off"></div>
 <div class="card"><b>1 · Job-UI — Prompt → Video</b>
-<p>Storyboard + Entwurf per OpenRouter oder OmniRoute (anklickbar), dann rendern.</p>
-<a class="btn" data-port="3120" href="#">Öffnen</a></div>
+<p>Storyboard + Entwurf per OpenRouter oder OmniRoute (anklickbar), dann rendern. API-Keys unter ⚙ Einstellungen.</p>
+<a class="btn needtok" data-path="/" href="#">Öffnen</a></div>
 <div class="card"><b>2 · Studio — Vorschau &amp; Nacharbeiten</b>
 <p>Kompositionen live sehen, Elemente wählen, Timeline prüfen.</p>
 <a class="btn" data-port="3100" href="#">Öffnen</a></div>
 <div class="card"><b>3 · Galerie — Ergebnisse laden</b>
-<p>Fertige MP4s herunterladen, eigene Dateien hochladen.</p>
+<p>Fertige MP4s herunterladen, eigene Dateien hochladen. <span class="mut">(eigener Login)</span></p>
 <a class="btn" data-port="3101" href="#">Öffnen</a></div>
 <div class="card"><b>4 · OmniRoute — KI-Gateway</b>
-<p>Lokaler Endpoint mit Free-Tiers: <small><code>/v1</code> (OpenAI-kompatibel)</small></p>
+<p>Lokaler Endpoint mit Free-Tiers. <span class="mut"><code>/v1</code> (OpenAI-kompatibel)</span></p>
 <a class="btn" data-port="20128" href="#">Öffnen</a></div>
 <script>
-document.querySelectorAll("a[data-port]").forEach(a=>{
-  a.href = location.protocol+"//"+location.hostname+":"+a.dataset.port+"/";
-});
+const t = document.getElementById("tok");
+t.value = localStorage.getItem("hf-job-token") || "";
+function links(){
+  const v = t.value.trim();
+  localStorage.setItem("hf-job-token", v);
+  document.querySelectorAll("a[data-port]").forEach(a=>{
+    a.href = location.protocol+"//"+location.hostname+":"+a.dataset.port+"/";
+  });
+  document.querySelectorAll("a.needtok").forEach(a=>{
+    a.href = location.protocol+"//"+location.hostname+":3120"+a.dataset.path+(v?"?token="+encodeURIComponent(v):"");
+  });
+}
+t.addEventListener("input", links); links();
 </script>
 </body></html>

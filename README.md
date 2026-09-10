@@ -48,6 +48,10 @@ bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/HyperFram
 
 OpenRouter-Key nachtragen (optional):
 `pct exec CT-ID -- nano /opt/hyperframes/.env` → `systemctl restart hf-jobs`.
+Bequemer: In der Job-UI auf **⚙ Einstellungen** — dort OpenRouter-Token und
+eigene OmniRoute-Instanz (URL + API-Key) eintragen, speichern und pro Anbieter
+per **Verbindung testen** prüfen. Keys werden maskiert angezeigt
+(`settings.json`, nur lesbar für den Dienst).
 
 ## Update
 
