@@ -96,7 +96,10 @@ pct exec "$CT_ID" -- env REPO_RAW="$REPO_RAW" \
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive PATH="/usr/local/bin:$PATH"
 echo "==> [CT] Basis"
-apt-get update && apt-get install -y curl git ffmpeg python3 socat ufw ca-certificates gnupg openssl
+apt-get update && apt-get install -y curl git ffmpeg python3 socat ufw ca-certificates gnupg openssl sudo locales iproute2
+sed -i 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen 2>/dev/null || echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+locale-gen en_US.UTF-8 >/dev/null 2>&1 || true
+export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 echo "==> [CT] Node.js 22"
 mkdir -p /etc/apt/keyrings
 curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
