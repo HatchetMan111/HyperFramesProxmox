@@ -25,8 +25,8 @@ CT_DISK="${CT_DISK:-20}"
 IP_CIDR="${IP_CIDR:-dhcp}"
 CT_GW="${CT_GW:-}"
 CT_DNS="${CT_DNS:-192.168.178.1}"
-# Ports im Container (Portal = Einstieg)
-PORT_PORTAL=8080 PORT_STUDIO=3100 PORT_GALLERY=3101 PORT_JOBS=3120 PORT_OMNI=20128
+# Ports im Container (Portal = Einstieg; Studio horcht auf localhost:3002 und wird per socat auf :3100 ins LAN gebrückt — Ports stehen in src/systemd/)
+PORT_PORTAL=8080 PORT_STUDIO_LAN=3100 PORT_GALLERY=3101 PORT_JOBS=3120 PORT_OMNI=20128
 # ===============================================================
 
 LOG="/tmp/${APP}-install.log"
@@ -41,23 +41,41 @@ msg_error() { echo -e "${RD}✘ $*${CL}"; }
 # shellcheck disable=SC2154  # ec wird im trap zugewiesen
 trap 'ec=$?; msg_error "Abbruch (Exit $ec) beim Befehl: $BASH_COMMAND";
   echo "--- letzte 30 Logzeilen ($LOG) ---"; tail -n 30 "$LOG" 2>/dev/null || true;
-  echo "--- Tipp: erneut mit DEBUG=1 starten: DEBUG=1 bash -x $0 ---";
+  echo "--- Tipp: Einzeiler mit DEBUG=1 davor setzen für bash -x ---";
   echo "--- CT-Logs: pct exec $CT_ID -- journalctl -n 50 ---";
   exit $ec' ERR
 
 [ "$(id -u)" = "0" ] || { msg_error "Als root auf dem Proxmox-Host ausführen."; exit 1; }
 command -v pct >/dev/null || { msg_error "pct nicht gefunden — Proxmox-Host nötig."; exit 1; }
 
-# ---------- Idempotenz: existierende CT-ID niemals überschreiben ----------
+# ---------- Idempotenz: existierende CT-ID nur mit RESUME=1 weiterbauen ----------
+RESUME=0
 if pct status "$CT_ID" >/dev/null 2>&1; then
-  msg_error "Container $CT_ID existiert bereits — Abbruch (kein Überschreiben)."
-  echo "  Entfernen mit: pct stop $CT_ID && pct destroy $CT_ID"
-  echo "  Oder andere ID wählen: CT_ID=211 bash -c \"\$(wget -qLO - $REPO_RAW/install/hyperframes-suite.sh)\""
-  exit 1
+  if [ "${RESUME_MODE:-0}" = "1" ]; then
+    hn="$(pct exec "$CT_ID" -- hostname 2>/dev/null || echo ?)"
+    [ "$hn" = "$CT_HOSTNAME" ] || { msg_error "CT $CT_ID heißt '$hn', erwartet '$CT_HOSTNAME' — Resume abgebrochen."; exit 1; }
+    msg_info "Resume-Modus: CT $CT_ID ($hn) wird weiter eingerichtet, kein Neuaufbau"
+    RESUME=1
+    if [ "$(pct status "$CT_ID" 2>/dev/null | awk '{print $2}')" != "running" ]; then
+      msg_info "CT $CT_ID ist gestoppt — starte"
+      pct start "$CT_ID"
+      for i in $(seq 1 45); do
+        if pct exec "$CT_ID" -- true 2>/dev/null; then break; fi
+        if [ "$i" = "45" ]; then msg_error "CT startet nicht."; exit 1; fi
+        sleep 2
+      done
+    fi
+  else
+    msg_error "Container $CT_ID existiert bereits — Abbruch (kein Überschreiben)."
+    echo "  Entfernen mit: pct stop $CT_ID && pct destroy $CT_ID"
+    echo "  Andere ID: CT_ID=211 bash -c \"\$(wget -qLO - $REPO_RAW/install/hyperframes-suite.sh)\""
+    echo "  Abgebrochene Installation fortsetzen: RESUME_MODE=1 bash -c \"\$(wget -qLO - $REPO_RAW/install/hyperframes-suite.sh)\""
+    exit 1
+  fi
 fi
 
-# ---------- Template sicherstellen ----------
-msg_info "Debian-12-Template prüfen"
+# ---------- Template sicherstellen (nur bei Neuaufbau nötig) ----------
+if [ "$RESUME" = "0" ]; then
 TPL="$(pveam available -section system 2>/dev/null | grep -o "debian-12-standard_[^ ]*amd64.tar.zst" | sort -V | tail -n 1 || true)"
 [ -n "$TPL" ] || { msg_error "Kein debian-12-Template im Katalog gefunden."; exit 1; }
 if ! pveam list "$CT_TEMPLATE_STORAGE" 2>/dev/null | grep -q "debian-12-standard"; then
@@ -76,14 +94,17 @@ pct create "$CT_ID" "${CT_TEMPLATE_STORAGE}:vztmpl/$TPL" \
   --nameserver "$CT_DNS" --unprivileged 1 --features nesting=1 --onboot 1 --start 1
 msg_ok "Container erstellt und gestartet"
 
-# Auf Netzwerk im CT warten (max. 90 s)
+# Auf CT + IP warten (max. 120 s — DHCP kann dauern; if-Bedingungen sind set -e-sicher)
 msg_info "Warte auf CT-Netzwerk"
-for i in $(seq 1 45); do
-  pct exec "$CT_ID" -- true 2>/dev/null && break
+for i in $(seq 1 60); do
+  if pct exec "$CT_ID" -- true 2>/dev/null; then
+    if [ -n "$(pct exec "$CT_ID" -- hostname -I 2>/dev/null | awk '{print $1}')" ]; then break; fi
+  fi
+  if [ "$i" = "60" ]; then msg_error "CT hat nach 120 s keine IP (DHCP/Netz prüfen)."; exit 1; fi
   sleep 2
-  [ "$i" = "45" ] && { msg_error "CT antwortet nicht."; exit 1; }
 done
 sleep 5
+fi
 CT_IP="$(pct exec "$CT_ID" -- hostname -I 2>/dev/null | awk '{print $1}')"
 [ -n "$CT_IP" ] || { msg_error "Keine CT-IP ermittelbar."; exit 1; }
 msg_ok "CT-IP: $CT_IP"
@@ -124,14 +145,20 @@ done
 cp "$BASE/portal.html" "$BASE/portal/index.html"
 [ -f "$BASE/.env" ] || { cp "$BASE/env.example" "$BASE/.env"; sed -i "s/^JOB_TOKEN=.*/JOB_TOKEN=$(openssl rand -hex 16)/" "$BASE/.env"; }
 chmod 600 "$BASE/.env"; chown -R hyperframes:hyperframes "$BASE" "$HDIR"
-echo "==> [CT] Chrome + Doctor"
-sudo -u hyperframes hyperframes browser ensure 2>&1 | tail -n 2
+echo "==> [CT] Chrome + Doctor (Download ~115 MB — je nach Leitung mehrere Minuten, bitte warten)"
+if ! timeout 1500 sudo -u hyperframes hyperframes browser ensure; then
+  echo "FEHLER: Chrome-Setup nach 25 Min. ohne Erfolg (Netz? Platte voll?)."
+  echo "Manuell fortsetzen im CT: sudo -u hyperframes hyperframes browser ensure"
+  echo "Cache prüfen im CT: du -sh /home/hyperframes/.cache/hyperframes/chrome/"
+  exit 1
+fi
 df -h /dev/shm
 sudo -u hyperframes hyperframes doctor 2>&1 | tail -n 15 || true
 echo "==> [CT] Studio-Starterprojekt"
 (cd "$BASE/projects" && sudo -u hyperframes HYPERFRAMES_SKIP_SKILLS=1 hyperframes init studio-home --example blank --non-interactive >/dev/null 2>&1 || true)
 cp -r "$BASE/projects/studio-home/." "$BASE/studio-home/" 2>/dev/null || true
 chown -R hyperframes:hyperframes "$BASE/studio-home"
+[ -f "$BASE/studio-home/index.html" ] || echo "WARNUNG: studio-home/index.html fehlt — Studio startet ggf. leer (Prüfung: ls $BASE/studio-home)"
 echo "==> [CT] Dienste aktivieren"
 cp "$BASE/systemd/"*.service "$BASE/systemd/"*.target /etc/systemd/system/
 if [ ! -f "$BASE/filebrowser.db" ]; then
@@ -144,39 +171,56 @@ systemctl daemon-reload
 systemctl enable --now hyperframes-suite.target
 echo "==> [CT] Firewall (Heimnetz)"
 ufw --force enable >/dev/null 2>&1 || true
-LAN=$(ip -o -f inet addr show eth0 | awk '{print $4}' | sed 's|\.[0-9]*/| .0/|' | tr -d ' ')
-for p in "$PORT_PORTAL" 3100 "$PORT_GALLERY" "$PORT_JOBS" "$PORT_OMNI"; do ufw allow from "$LAN" to any port "$p" proto tcp >/dev/null; done
+IFACE=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' || echo eth0)
+LAN=$(ip -o -f inet addr show "$IFACE" 2>/dev/null | awk '{print $4}' | head -n 1 | sed 's|\.[0-9]*/|.0/|' | tr -d ' ')
+if [ -z "$LAN" ]; then
+  echo "WARNUNG: LAN-Netz nicht ermittelbar (Interface $IFACE) — UFW-Regeln übersprungen, Ports nur per Proxmox-Firewall schützen!"
+else
+  for p in "$PORT_PORTAL" 3100 "$PORT_GALLERY" "$PORT_JOBS" "$PORT_OMNI"; do ufw allow from "$LAN" to any port "$p" proto tcp >/dev/null; done
+  echo "UFW-Regeln für $LAN gesetzt"
+fi
 echo "[CT] FERTIG"
 CTEOF
 msg_ok "App-Installation im Container abgeschlossen"
 
-# ---------- Verifikation vom Host ----------
+# ---------- Verifikation vom Host (mit Start-Wartezeit: Dienste brauchen bis ~60 s) ----------
 msg_info "Verifiziere Dienste + Web UIs"
 for svc in hf-studio hf-gallery omniroute hf-jobs hf-portal; do
-  st="$(pct exec "$CT_ID" -- systemctl is-active "$svc" 2>/dev/null || echo failed)"
-  [ "$st" = "active" ] || { msg_error "Service $svc: $st"; pct exec "$CT_ID" -- journalctl -u "$svc" -n 20 --no-pager || true; exit 1; }
-  msg_ok "Service $svc aktiv"
+  ok=0
+  for i in $(seq 1 12); do
+    if [ "$(pct exec "$CT_ID" -- systemctl is-active "$svc" 2>/dev/null || echo failed)" = "active" ]; then ok=1; break; fi
+    sleep 5
+  done
+  if [ "$ok" = "1" ]; then
+    msg_ok "Service $svc aktiv"
+  else
+    msg_error "Service $svc nicht aktiv nach 60 s"
+    pct exec "$CT_ID" -- journalctl -u "$svc" -n 20 --no-pager || true
+    exit 1
+  fi
 done
-for p in "$PORT_PORTAL" "$PORT_STUDIO" "$PORT_GALLERY" "$PORT_JOBS"; do :; done
-for p in "$PORT_PORTAL" "$PORT_GALLERY" "$PORT_JOBS"; do
+for p in "$PORT_PORTAL" "$PORT_STUDIO_LAN" "$PORT_GALLERY" "$PORT_JOBS"; do
   code="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$p/" || echo 000)"
   [ "$code" = "200" ] || { msg_error "Port $p antwortet mit HTTP $code"; exit 1; }
   msg_ok "Web UI :$p → HTTP $code"
 done
-# OmniRoute-Health (darf ohne Keys leere Modellauswahl melden, muss aber antworten)
-pct exec "$CT_ID" -- curl -s -o /dev/null "http://127.0.0.1:$PORT_OMNI/v1/models" \
-  && msg_ok "OmniRoute antwortet" || msg_info "OmniRoute noch im Start (gleich erneut prüfen)"
+# OmniRoute-Health (muss antworten; ohne Keys ggf. leere Modellauswahl — deshalb nur Info, kein Abbruch)
+if pct exec "$CT_ID" -- curl -sf -o /dev/null "http://127.0.0.1:$PORT_OMNI/v1/models"; then
+  msg_ok "OmniRoute antwortet"
+else
+  msg_info "OmniRoute noch im Start (gleich erneut prüfen)"
+fi
 
 GALPW="$(pct exec "$CT_ID" -- cat /opt/hyperframes/gallery-pass.txt 2>/dev/null || echo '?')"
 JOBTOK="$(pct exec "$CT_ID" -- grep ^JOB_TOKEN= /opt/hyperframes/.env | cut -d= -f2)"
 echo
 msg_ok "INSTALLATION FERTIG — Container $CT_ID ($CT_IP)"
 echo "  Portal (Einstieg):  http://$CT_IP:$PORT_PORTAL/"
-echo "  Studio:             http://$CT_IP:$PORT_STUDIO/  (Vorschau + Nacharbeiten)"
+  echo "  Studio:             http://$CT_IP:$PORT_STUDIO_LAN/  (Vorschau + Nacharbeiten)"
 echo "  Galerie:            http://$CT_IP:$PORT_GALLERY/  (admin / $GALPW)"
 echo "  Job-UI:             http://$CT_IP:$PORT_JOBS/     (Token: $JOBTOK)"
 echo "  OmniRoute:          http://$CT_IP:$PORT_OMNI/v1"
 echo "  OpenRouter-Key nachtragen: pct exec $CT_ID -- nano /opt/hyperframes/.env → systemctl restart hf-jobs"
-echo "  Update:  pct exec $CT_ID -- bash -c \"\$(wget -qLO - $REPO_RAW/install/update.sh)\"  (folgt)"
+  echo "  Update:  pct exec $CT_ID -- bash -c \"\$(wget -qLO - $REPO_RAW/install/update.sh)\""
 echo "  Entfernen: pct stop $CT_ID && pct destroy $CT_ID"
 echo "  Voll-Log: $LOG"

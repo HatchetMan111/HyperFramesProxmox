@@ -16,6 +16,11 @@ Das Script erstellt einen LXC (Debian 12, unprivilegiert, `onboot: 1`) und
 installiert alles darin — **nichts auf dem Host außer dem Container**.
 Am Ende gibt es die URLs + Logins aus. Bei Fehlern: komplette Fehlerkette im
 Log, neu starten mit `DEBUG=1` für `bash -x`-Details (siehe Script-Kopf).
+Abgebrochene Installation fortsetzen (gleiche CT-ID, kein Neuaufbau):
+
+```bash
+RESUME_MODE=1 bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/HyperFramesProxmox/main/install/hyperframes-suite.sh)"
+```
 
 Anpassungen per Umgebungsvariablen, z. B.:
 
