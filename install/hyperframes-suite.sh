@@ -27,6 +27,9 @@ CT_GW="${CT_GW:-}"
 CT_DNS="${CT_DNS:-192.168.178.1}"
 # Ports im Container (Portal = Einstieg; Studio horcht auf localhost:3002 und wird per socat auf :3100 ins LAN gebrückt — Ports stehen in src/systemd/)
 PORT_PORTAL=8080 PORT_STUDIO_LAN=3100 PORT_GALLERY=3101 PORT_JOBS=3120 PORT_OMNI=20128
+# OmniRoute: 0 = kein lokales Gateway installieren, nur per URL+Key mit einer
+# Remote-Instanz verbinden (in Job-UI unter Einstellungen). 1 = lokal mit installieren.
+INSTALL_OMNIROUTE="${INSTALL_OMNIROUTE:-0}"
 # ===============================================================
 
 LOG="/tmp/${APP}-install.log"
@@ -112,7 +115,7 @@ msg_ok "CT-IP: $CT_IP"
 
 # ---------- Setup im Container (alles aus GitHub, nichts fest verdrahtet) ----------
 msg_info "Installiere App im Container (ca. 10–15 Min.)"
-pct exec "$CT_ID" -- env REPO_RAW="$REPO_RAW" \
+pct exec "$CT_ID" -- env REPO_RAW="$REPO_RAW" INSTALL_OMNIROUTE="$INSTALL_OMNIROUTE" \
   PORT_PORTAL="$PORT_PORTAL" PORT_GALLERY="$PORT_GALLERY" PORT_JOBS="$PORT_JOBS" PORT_OMNI="$PORT_OMNI" \
   bash -s <<'CTEOF'
 set -euo pipefail
@@ -129,8 +132,13 @@ curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dea
 echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
 apt-get update && apt-get install -y nodejs
 node --version
-echo "==> [CT] hyperframes + omniroute"
-npm install -g hyperframes omniroute
+echo "==> [CT] hyperframes (+ optional omniroute)"
+npm install -g hyperframes
+if [ "${INSTALL_OMNIROUTE:-0}" = "1" ]; then
+  npm install -g omniroute
+else
+  echo "OmniRoute wird NICHT lokal installiert (nur Remote-Verbindung per URL+Key in den Einstellungen)"
+fi
 echo "==> [CT] FileBrowser"
 curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
 echo "==> [CT] Benutzer + Code aus Repo"
@@ -196,14 +204,20 @@ chown -R hyperframes:hyperframes "$BASE/studio-home"
 [ -f "$BASE/studio-home/index.html" ] || echo "WARNUNG: studio-home/index.html fehlt — Studio startet ggf. leer (Prüfung: ls $BASE/studio-home)"
 echo "==> [CT] Dienste aktivieren"
 cp "$BASE/systemd/"*.service "$BASE/systemd/"*.target /etc/systemd/system/
-echo "==> [CT] OmniRoute-Startform erkennen (serve-Unterbefehl oder Standard-Start)"
-OMNI_BIN="$(command -v omniroute)"
-if "$OMNI_BIN" --help 2>&1 | grep -wq "serve"; then
-  mkdir -p /etc/systemd/system/omniroute.service.d
-  printf '[Service]\nExecStart=\nExecStart=%s serve --port 20128\n' "$OMNI_BIN" > /etc/systemd/system/omniroute.service.d/exec.conf
-  echo "OmniRoute nutzt 'serve'-Modus"
+echo "==> [CT] OmniRoute-Startform erkennen (nur wenn lokal installiert)"
+if command -v omniroute >/dev/null 2>&1; then
+  OMNI_BIN="$(command -v omniroute)"
+  if "$OMNI_BIN" --help 2>&1 | grep -wq "serve"; then
+    mkdir -p /etc/systemd/system/omniroute.service.d
+    printf '[Service]\nExecStart=\nExecStart=%s serve --port 20128\n' "$OMNI_BIN" > /etc/systemd/system/omniroute.service.d/exec.conf
+    echo "OmniRoute nutzt 'serve'-Modus"
+  else
+    echo "OmniRoute nutzt Standard-Start (Port per ENV)"
+  fi
+  systemctl enable omniroute.service 2>/dev/null || true
 else
-  echo "OmniRoute nutzt Standard-Start (Port per ENV)"
+  echo "OmniRoute nicht lokal installiert — Dienst wird maskiert (Remote-Instanz in Job-UI Einstellungen verbinden)"
+  systemctl mask omniroute.service 2>/dev/null || true
 fi
 if [ ! -f "$BASE/filebrowser.db" ]; then
   sudo -u hyperframes filebrowser config init --address 0.0.0.0 --port "$PORT_GALLERY" --root "$BASE/gallery" --database "$BASE/filebrowser.db" >/dev/null
@@ -229,7 +243,14 @@ msg_ok "App-Installation im Container abgeschlossen"
 
 # ---------- Verifikation vom Host (mit Start-Wartezeit: Dienste brauchen bis ~60 s) ----------
 msg_info "Verifiziere Dienste + Web UIs"
-for svc in hf-studio hf-gallery omniroute hf-jobs hf-portal; do
+# shellcheck disable=SC2086  # SVCS ist bewusst wortgetrennt
+SVCS="hf-studio hf-gallery hf-jobs hf-portal"
+if pct exec "$CT_ID" -- systemctl is-enabled omniroute.service >/dev/null 2>&1; then
+  SVCS="$SVCS omniroute"
+else
+  msg_info "OmniRoute lokal nicht installiert — Dienst-Prüfung übersprungen (Remote-Instanz in Job-UI verbinden)"
+fi
+for svc in $SVCS; do
   ok=0
   for i in $(seq 1 12); do
     if [ "$(pct exec "$CT_ID" -- systemctl is-active "$svc" 2>/dev/null || echo failed)" = "active" ]; then ok=1; break; fi
@@ -243,16 +264,21 @@ for svc in hf-studio hf-gallery omniroute hf-jobs hf-portal; do
     exit 1
   fi
 done
-for p in "$PORT_PORTAL" "$PORT_STUDIO_LAN" "$PORT_GALLERY" "$PORT_JOBS"; do
+for p in "$PORT_PORTAL" "$PORT_STUDIO_LAN" "$PORT_GALLERY"; do
   code="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$p/" || echo 000)"
   [ "$code" = "200" ] || { msg_error "Port $p antwortet mit HTTP $code"; exit 1; }
   msg_ok "Web UI :$p → HTTP $code"
 done
-# OmniRoute-Health (muss antworten; ohne Keys ggf. leere Modellauswahl — deshalb nur Info, kein Abbruch)
-if pct exec "$CT_ID" -- curl -sf -o /dev/null "http://127.0.0.1:$PORT_OMNI/v1/models"; then
-  msg_ok "OmniRoute antwortet"
-else
-  msg_info "OmniRoute noch im Start (gleich erneut prüfen)"
+code="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT_JOBS/healthz" || echo 000)"
+[ "$code" = "200" ] || { msg_error "Job-UI (:$PORT_JOBS/healthz) antwortet mit HTTP $code"; exit 1; }
+msg_ok "Job-UI :$PORT_JOBS → HTTP $code (Healthcheck; UI selbst braucht Token)"
+# OmniRoute-Health nur bei lokaler Installation (sonst nur Info, kein Abbruch)
+if pct exec "$CT_ID" -- systemctl is-enabled omniroute.service >/dev/null 2>&1; then
+  if pct exec "$CT_ID" -- curl -sf -o /dev/null "http://127.0.0.1:$PORT_OMNI/v1/models"; then
+    msg_ok "OmniRoute antwortet"
+  else
+    msg_info "OmniRoute noch im Start (gleich erneut prüfen)"
+  fi
 fi
 
 GALPW="$(pct exec "$CT_ID" -- cat /opt/hyperframes/gallery-pass.txt 2>/dev/null || echo '?')"
@@ -262,8 +288,12 @@ msg_ok "INSTALLATION FERTIG — Container $CT_ID ($CT_IP)"
 echo "  Portal (Einstieg):  http://$CT_IP:$PORT_PORTAL/"
   echo "  Studio:             http://$CT_IP:$PORT_STUDIO_LAN/  (Vorschau + Nacharbeiten)"
 echo "  Galerie:            http://$CT_IP:$PORT_GALLERY/  (admin / $GALPW)"
-echo "  Job-UI:             http://$CT_IP:$PORT_JOBS/     (Token: $JOBTOK)"
-echo "  OmniRoute:          http://$CT_IP:$PORT_OMNI/v1"
+  echo "  Job-UI:             http://$CT_IP:$PORT_JOBS/     (Token: $JOBTOK)"
+  if pct exec "$CT_ID" -- systemctl is-enabled omniroute.service >/dev/null 2>&1; then
+    echo "  OmniRoute:          http://$CT_IP:$PORT_OMNI/v1"
+  else
+    echo "  OmniRoute:          nicht lokal installiert — Remote-Instanz in Job-UI unter Einstellungen verbinden"
+  fi
 echo "  OpenRouter-Key nachtragen: pct exec $CT_ID -- nano /opt/hyperframes/.env → systemctl restart hf-jobs"
   echo "  Update:  pct exec $CT_ID -- bash -c \"\$(wget -qLO - $REPO_RAW/install/update.sh)\""
 echo "  Entfernen: pct stop $CT_ID && pct destroy $CT_ID"

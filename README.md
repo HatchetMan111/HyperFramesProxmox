@@ -35,6 +35,7 @@ bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/HyperFram
 | `CT_CPU` / `CT_RAM` / `CT_DISK` | `2` / `4096` / `20` | Ressourcen (Rendern mag `4` / `8192`) |
 | `CT_STORAGE` | `local-lvm` | Disk-Storage |
 | `IP_CIDR` / `CT_GW` | `dhcp` | statisch z. B. `"192.168.178.60/24"` + GW |
+| `INSTALL_OMNIROUTE` | `0` | `1` = lokales KI-Gateway mit installieren; Standard `0` = nur per URL + API-Key mit einer Remote-Instanz verbinden (in Job-UI unter Einstellungen) |
 
 ## Web UIs (nach Installation, `CT-IP` aus der Ausgabe)
 

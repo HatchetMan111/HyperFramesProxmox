@@ -301,6 +301,10 @@ ${msg ? `<div class="card">${msg}</div>` : ""}
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, "http://x");
+  if (req.method === "GET" && u.pathname === "/healthz") {
+    res.writeHead(200, { "Content-Type": "text/plain" }).end("ok");
+    return;
+  }
   const qTok = u.searchParams.get("token") || "";
   const authed = TOKEN && qTok === TOKEN;
   const needAuth = () => {
