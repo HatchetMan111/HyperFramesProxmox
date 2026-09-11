@@ -153,8 +153,16 @@ for u in hf-studio.service hf-studio-bridge.service hf-gallery.service omniroute
   curl -fsSL "$REPO_RAW/src/systemd/$u" -o "$BASE/systemd/$u"
 done
 cp "$BASE/portal.html" "$BASE/portal/index.html"
+curl -fsSL "$REPO_RAW/install/update.sh" -o "$BASE/update.sh"
+chmod +x "$BASE/update.sh"
 [ -f "$BASE/.env" ] || { cp "$BASE/env.example" "$BASE/.env"; sed -i "s/^JOB_TOKEN=.*/JOB_TOKEN=$(openssl rand -hex 16)/" "$BASE/.env"; }
 chmod 600 "$BASE/.env"; chown -R hyperframes:hyperframes "$BASE" "$HDIR"
+echo "==> [CT] sudo-Regeln für UI-Verwaltung (Neustarts, Update — LAN-Box, dokumentiert in README)"
+cat > /etc/sudoers.d/hyperframes-suite <<'SUDO'
+hyperframes ALL=(root) NOPASSWD: /bin/systemctl restart hf-jobs, /bin/systemctl restart hf-studio, /bin/systemctl restart hf-studio-bridge, /bin/systemctl restart hf-gallery, /bin/systemctl restart hf-portal, /bin/systemctl restart omniroute, /opt/hyperframes/update.sh
+SUDO
+chmod 440 /etc/sudoers.d/hyperframes-suite
+visudo -c -q -f /etc/sudoers.d/hyperframes-suite || { echo "FEHLER: sudoers ungültig"; exit 1; }
 echo "==> [CT] Chrome + Doctor (Download ~115 MB + Entpacken — Fortschritt unten, bitte warten)"
 df -h / | tail -n 1
 CHROME_BIN="$(sudo -u hyperframes hyperframes browser path 2>/dev/null || true)"

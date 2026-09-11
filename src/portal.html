@@ -28,6 +28,9 @@ small{color:#888}
 <div class="card"><b>4 · OmniRoute — KI-Gateway</b>
 <p>Lokaler Endpoint mit Free-Tiers. <span class="mut"><code>/v1</code> (OpenAI-kompatibel)</span></p>
 <a class="btn" data-port="20128" href="#">Öffnen</a></div>
+<div class="card"><b>5 · System — alles ohne SSH</b>
+<p>Dienste neu starten, Token/Passwörter wechseln, Update per Klick. <span class="mut">(Job-UI-Token nötig)</span></p>
+<a class="btn needtok" data-path="/system" href="#">Öffnen</a></div>
 <script>
 const t = document.getElementById("tok");
 t.value = localStorage.getItem("hf-job-token") || "";

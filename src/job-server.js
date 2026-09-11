@@ -166,6 +166,67 @@ function run(cmd, args, cwd, logFile) {
     p.on("error", (e) => { log.write("[error " + e.message + "]\n"); log.end(); resolve(1); });
   });
 }
+function shCapture(cmd, args) {
+  return new Promise((resolve) => {
+    const p = spawn(cmd, args);
+    let out = "";
+    p.stdout.on("data", (d) => { out += d; });
+    p.stderr.on("data", (d) => { out += d; });
+    p.on("close", (code) => resolve({ code, out: out.trim().slice(0, 2000) }));
+    p.on("error", (e) => resolve({ code: 127, out: e.message }));
+  });
+}
+
+/* ---------- System-Verwaltung (alles per UI, ohne SSH) ---------- */
+const ENV_FILE = path.join(BASE, ".env");
+const ALLOWED_RESTARTS = ["hf-jobs", "hf-studio", "hf-studio-bridge", "hf-gallery", "hf-portal", "omniroute"];
+async function serviceStates() {
+  const out = [];
+  for (const s of ALLOWED_RESTARTS) {
+    const r = await shCapture("systemctl", ["is-active", s]);
+    out.push({ name: s, active: r.out === "active" });
+  }
+  return out;
+}
+async function versions() {
+  const hf = await shCapture("hyperframes", ["--version"]);
+  const node = await shCapture("node", ["--version"]);
+  return { hyperframes: hf.out.split("\n")[0] || "?", node: node.out.split("\n")[0] || "?" };
+}
+function setEnvToken(newToken) {
+  let content = "";
+  try { content = fs.readFileSync(ENV_FILE, "utf8"); } catch { content = ""; }
+  if (/^JOB_TOKEN=.*/m.test(content)) content = content.replace(/^JOB_TOKEN=.*/m, "JOB_TOKEN=" + newToken);
+  else content += (content.endsWith("\n") || content === "" ? "" : "\n") + "JOB_TOKEN=" + newToken + "\n";
+  fs.writeFileSync(ENV_FILE, content, { mode: 0o600 });
+}
+function systemPage(tok, states, vers, msg) {
+  const rows = states.map((s) =>
+    `<div class="card" style="display:flex;align-items:center;gap:12px">`
+    + `${s.active ? '<span class="ok">● aktiv</span>' : '<span class="err">● gestoppt</span>'} <b>${esc(s.name)}</b>`
+    + `<form method="post" action="/system/restart?token=${tok}" style="margin-left:auto">`
+    + `<input type="hidden" name="svc" value="${esc(s.name)}">`
+    + `<button style="margin:0;padding:8px 18px">Neu starten</button></form></div>`).join("");
+  return page("System", "sys", tok, `
+<h2>🖥 System — alles ohne SSH</h2>
+${msg ? `<div class="card">${msg}</div>` : ""}
+<div class="card"><b>Versionen:</b> Hyperframes ${esc(vers.hyperframes)} · Node ${esc(vers.node)}<br>
+<span class="mut">Basis: ${esc(BASE)} · Chrome, FFmpeg und Keys siehe unten.</span></div>
+<h2>Dienste</h2>${rows}
+<div class="card"><h2>Job-UI-Token wechseln</h2>
+<p class="mut">Neues Token speichern → Dienst startet automatisch neu → danach mit neuem Token anmelden.</p>
+<form method="post" action="/system/token?token=${tok}">
+<input type="text" name="newtoken" required minlength="12" placeholder="Neues Token (min. 12 Zeichen)">
+<button>Token wechseln + neu starten</button></form></div>
+<div class="card"><h2>Galerie-Passwort neu setzen</h2>
+<form method="post" action="/system/gallery-password?token=${tok}">
+<input type="text" name="newpw" required minlength="8" placeholder="Neues Galerie-Passwort">
+<button>Passwort setzen</button></form></div>
+<div class="card"><h2>Update aus GitHub</h2>
+<p class="mut">Holt update.sh aus dem Repo und führt es aus (Log unten). Dauert Minuten.</p>
+<form method="post" action="/system/update?token=${tok}"><button>Update starten</button></form>
+<p><a class="btn sec" href="/system/update-log?token=${tok}">Update-Log ansehen</a></p></div>`);
+}
 
 /* ---------- Pipeline ---------- */
 async function pipeline(id, opts) {
@@ -246,7 +307,8 @@ pre.log{background:#0d0d0d;border:1px solid #333;border-radius:10px;padding:14px
 .prov input{accent-color:#7ED957}`;
 const NAV = (on, tok) => `<nav><a href="/?token=${tok}" class="${on === "neu" ? "on" : ""}">＋ Neu</a>`
   + `<a href="/jobs-list?token=${tok}" class="${on === "jobs" ? "on" : ""}">Aufträge</a>`
-  + `<a href="/einstellungen?token=${tok}" class="${on === "set" ? "on" : ""}">⚙ Einstellungen</a></nav>`;
+  + `<a href="/einstellungen?token=${tok}" class="${on === "set" ? "on" : ""}">⚙ KI-Keys</a>`
+  + `<a href="/system?token=${tok}" class="${on === "sys" ? "on" : ""}">🖥 System</a></nav>`;
 const page = (title, on, tok, body) => `<!doctype html><html lang="de"><head><meta charset="utf-8">`
   + `<meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · Hyperframes</title>`
   + `<style>${CSS}</style></head><body><h1>🎬 Hyperframes Job-UI</h1>${NAV(on, tok)}${body}</body></html>`;
@@ -299,7 +361,7 @@ ${msg ? `<div class="card">${msg}</div>` : ""}
 <p class="mut">Gespeichert in <code>settings.json</code> (0600, nur lesbar für den Dienst). Datei-Einträge aus <code>.env</code> gelten als Fallback.</p>`);
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://x");
   if (req.method === "GET" && u.pathname === "/healthz") {
     res.writeHead(200, { "Content-Type": "text/plain" }).end("ok");
@@ -408,6 +470,78 @@ const server = http.createServer((req, res) => {
     }
     const ext = { ".png": "image/png", ".jpg": "image/jpeg", ".log": "text/plain; charset=utf-8", ".md": "text/markdown; charset=utf-8", ".txt": "text/plain; charset=utf-8" }[path.extname(fp)] || "application/octet-stream";
     res.writeHead(200, { "Content-Type": ext }).end(fs.readFileSync(fp));
+    return;
+  }
+  if (req.method === "GET" && u.pathname === "/system") {
+    if (!needAuth()) return;
+    const [states, vers] = await Promise.all([serviceStates(), versions()]);
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(systemPage(qTok, states, vers, ""));
+    return;
+  }
+  if (req.method === "POST" && u.pathname === "/system/restart") {
+    if (!needAuth()) return;
+    bodyOf().then(async (b) => {
+      const svc = new URLSearchParams(b).get("svc") || "";
+      if (!ALLOWED_RESTARTS.includes(svc)) { res.writeHead(400).end("unbekannter Dienst"); return; }
+      const r = await shCapture("sudo", ["systemctl", "restart", svc]);
+      const [states, vers] = await Promise.all([serviceStates(), versions()]);
+      const msg = r.code === 0 ? `<span class="ok">✓ ${esc(svc)} wird neu gestartet.</span>`
+        : `<span class="err">✘ Neustart fehlgeschlagen (Exit ${r.code}).</span> ${esc(r.out)}<br><span class="mut">Fehlt die sudo-Regel? Install-Script erneut laufen lassen (RESUME_MODE=1).</span>`;
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(systemPage(qTok, states, vers, msg));
+    }).catch(() => res.writeHead(400).end("ungültig"));
+    return;
+  }
+  if (req.method === "POST" && u.pathname === "/system/token") {
+    if (!needAuth()) return;
+    bodyOf().then((b) => {
+      const nt = (new URLSearchParams(b).get("newtoken") || "").trim();
+      if (nt.length < 12) { res.writeHead(400).end("Token zu kurz (min. 12)"); return; }
+      try { setEnvToken(nt); } catch (e) { res.writeHead(500).end("Schreiben fehlgeschlagen: " + e.message); return; }
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(
+        `<h1>Token gewechselt</h1><p>Dienst startet neu — in ca. 10 Sekunden mit dem <b>neuen</b> Token anmelden.</p>`);
+      setTimeout(() => { shCapture("sudo", ["systemctl", "restart", "hf-jobs"]).then(() => process.exit(0)); }, 800);
+    }).catch(() => res.writeHead(400).end("ungültig"));
+    return;
+  }
+  if (req.method === "POST" && u.pathname === "/system/gallery-password") {
+    if (!needAuth()) return;
+    bodyOf().then(async (b) => {
+      const pw = (new URLSearchParams(b).get("newpw") || "").trim();
+      if (pw.length < 8) { res.writeHead(400).end("Passwort zu kurz (min. 8)"); return; }
+      const r = await shCapture("filebrowser", ["users", "update", "admin", "--password", pw, "--database", path.join(BASE, "filebrowser.db")]);
+      const [states, vers] = await Promise.all([serviceStates(), versions()]);
+      const msg = r.code === 0 ? `<span class="ok">✓ Galerie-Passwort gesetzt.</span>`
+        : `<span class="err">✘ Fehlgeschlagen (Exit ${r.code}).</span> ${esc(r.out)}`;
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(systemPage(qTok, states, vers, msg));
+    }).catch(() => res.writeHead(400).end("ungültig"));
+    return;
+  }
+  if (req.method === "POST" && u.pathname === "/system/update") {
+    if (!needAuth()) return;
+    const logFile = path.join(BASE, "update.log");
+    // Update läuft im Hintergrund (sudo); Status via Log
+    fs.appendFileSync(logFile, "\n=== Update gestartet (UI) ===\n");
+    const upd = spawn("sudo", ["bash", path.join(BASE, "update.sh")]);
+    const log = fs.createWriteStream(logFile, { flags: "a" });
+    upd.stdout.on("data", (d) => log.write(d));
+    upd.stderr.on("data", (d) => log.write(d));
+    upd.on("close", (c) => { log.write("\n[update exit " + c + "]\n"); log.end(); });
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(
+      page("Update", "sys", qTok, `<h2>Update läuft …</h2><p>Dauert Minuten.</p>`
+        + `<meta http-equiv="refresh" content="8;url=/system/update-log?token=${qTok}">`
+        + `<p><a class="btn sec" href="/system/update-log?token=${qTok}">Zum Log</a></p>`));
+    return;
+  }
+  if (req.method === "GET" && u.pathname === "/system/update-log") {
+    if (!needAuth()) return;
+    let content = "(noch kein Update-Log)";
+    try {
+      const lines = fs.readFileSync(path.join(BASE, "update.log"), "utf8").split("\n");
+      content = lines.slice(-60).join("\n");
+    } catch { content = "(noch kein Update-Log)"; }
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(
+      page("Update-Log", "sys", qTok, `<h2>Update-Log</h2><pre class="log">${esc(content)}</pre>`
+        + `<meta http-equiv="refresh" content="10">`));
     return;
   }
   if (req.method === "POST" && u.pathname === "/job") {
