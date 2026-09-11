@@ -99,6 +99,25 @@ async function testProvider(provider) {
   } finally { clearTimeout(t); }
 }
 
+async function fetchModels(provider) {
+  const s = loadSettings();
+  const isOR = provider === "openrouter";
+  const base = isOR ? "https://openrouter.ai/api/v1" : s.omniUrl;
+  const key = isOR ? s.openrouterKey : s.omniKey;
+  const headers = {};
+  if (key) headers.Authorization = "Bearer " + key;
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 25000);
+  try {
+    const res = await fetch(base + "/models", { headers, signal: ctl.signal });
+    if (!res.ok) return { ok: false, info: "HTTP " + res.status };
+    const data = await res.json();
+    const ids = (data.data || []).map((m) => m.id).filter(Boolean).sort().slice(0, 2000);
+    return { ok: true, models: ids, count: ids.length };
+  } catch (e) {
+    return { ok: false, info: e.message };
+  } finally { clearTimeout(t); }
+}
 function extractHTML(text) {
   const m = text.match(/```html\s*([\s\S]*?)```/i);
   const html = (m ? m[1] : text).trim();
@@ -347,18 +366,58 @@ ${msg ? `<div class="card">${msg}</div>` : ""}
 <label>API-Token <span class="mut">(aktuell: ${esc(mask(s.openrouterKey))})</span></label>
 <input type="password" name="openrouterKey" placeholder="sk-or-… (leer = unverändert)" autocomplete="off">
 <label>Standard-Modell</label>
-<input type="text" name="openrouterModel" value="${esc(s.openrouterModel)}">
-<p><a class="btn sec" href="/test?provider=openrouter&token=${tok}">Verbindung testen</a></p></div>
+<input type="text" id="model-openrouter" name="openrouterModel" value="${esc(s.openrouterModel)}">
+<div class="mut">Aus Liste wählen:</div>
+<input type="text" id="q-openrouter" placeholder="🔍 Modelle suchen …" oninput="filterMods('openrouter')">
+<div style="display:flex;gap:10px;margin-top:8px">
+<button type="button" class="btn sec" style="margin:0" onclick="loadMods('openrouter')">Liste laden</button>
+<a class="btn sec" style="margin:0" href="/test?provider=openrouter&token=${tok}">Verbindung testen</a></div>
+<div id="list-openrouter" class="modlist"><span class="mut">Noch nicht geladen.</span></div></div>
 <div class="card"><h2>OmniRoute-Instanz</h2>
 <label>Basis-URL <span class="mut">(eigene Instanz oder lokal)</span></label>
 <input type="text" name="omniUrl" value="${esc(s.omniUrl)}">
 <label>API-Key <span class="mut">(aktuell: ${esc(mask(s.omniKey))}, leer lassen wenn keyless)</span></label>
 <input type="password" name="omniKey" placeholder="leer = unverändert" autocomplete="off">
 <label>Standard-Modell</label>
-<input type="text" name="omniModel" value="${esc(s.omniModel)}">
-<p><a class="btn sec" href="/test?provider=omniroute&token=${tok}">Verbindung testen</a></p></div>
+<input type="text" id="model-omniroute" name="omniModel" value="${esc(s.omniModel)}">
+<div class="mut">Aus Liste wählen:</div>
+<input type="text" id="q-omniroute" placeholder="🔍 Modelle suchen …" oninput="filterMods('omniroute')">
+<div style="display:flex;gap:10px;margin-top:8px">
+<button type="button" class="btn sec" style="margin:0" onclick="loadMods('omniroute')">Liste laden</button>
+<a class="btn sec" style="margin:0" href="/test?provider=omniroute&token=${tok}">Verbindung testen</a></div>
+<div id="list-omniroute" class="modlist"><span class="mut">Noch nicht geladen.</span></div></div>
 <button>Speichern</button></form>
-<p class="mut">Gespeichert in <code>settings.json</code> (0600, nur lesbar für den Dienst). Datei-Einträge aus <code>.env</code> gelten als Fallback.</p>`);
+<p class="mut">Gespeichert in <code>settings.json</code> (0600, nur lesbar für den Dienst). „__LEEREN__" als Key löscht ihn. Datei-Einträge aus <code>.env</code> gelten als Fallback.</p>
+<style>.modlist{max-height:220px;overflow:auto;border:1px solid #333;border-radius:9px;margin-top:8px;background:#0d0d0d}
+.modlist div{padding:8px 12px;cursor:pointer;border-bottom:1px solid #222;font-size:14px}
+.modlist div:hover{background:#1e3a24}</style>
+<script>
+const MODS = { openrouter: [], omniroute: [] };
+const TOK = ${JSON.stringify(tok)};
+async function loadMods(p) {
+  const box = document.getElementById("list-" + p);
+  box.innerHTML = "<span class='mut'>Lade …</span>";
+  try {
+    const r = await fetch("/modelle?provider=" + p + "&token=" + encodeURIComponent(TOK));
+    const j = await r.json();
+    if (!j.ok) { box.innerHTML = "<span class='mut'>Fehler: " + j.info + "</span>"; return; }
+    MODS[p] = j.models;
+    renderMods(p, "");
+  } catch (e) { box.innerHTML = "<span class='mut'>Fehler: " + e.message + "</span>"; }
+}
+function renderMods(p, q) {
+  const box = document.getElementById("list-" + p);
+  const hit = MODS[p].filter((m) => m.toLowerCase().includes(q.toLowerCase())).slice(0, 100);
+  box.innerHTML = hit.length
+    ? hit.map((m) => "<div onclick=\\"pickMod('" + p + "','" + m.replace(/'/g, "&#39;") + "')\\">" + m + "</div>").join("")
+    : "<span class='mut'>Keine Treffer.</span>";
+}
+function filterMods(p) { renderMods(p, document.getElementById("q-" + p).value); }
+function pickMod(p, m) {
+  document.getElementById("model-" + p).value = m;
+  document.getElementById("model-" + p).scrollIntoView({ block: "center" });
+}
+</script>`);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -419,6 +478,13 @@ const server = http.createServer(async (req, res) => {
           `<h2>Test: ${provider}</h2><div class="card">${r.ok ? `<span class="ok">✓ OK</span> — ${esc(r.info)}` : `<span class="err">✘ Fehlgeschlagen</span> — ${esc(r.info)}`}</div>`
           + `<p><a class="btn sec" href="/einstellungen?token=${qTok}">Zurück</a></p>`));
     });
+    return;
+  }
+  if (req.method === "GET" && u.pathname === "/modelle") {
+    if (!needAuth()) return;
+    const provider = u.searchParams.get("provider") === "openrouter" ? "openrouter" : "omniroute";
+    const r = await fetchModels(provider);
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(r));
     return;
   }
   if (req.method === "GET" && u.pathname === "/jobs-list") {
