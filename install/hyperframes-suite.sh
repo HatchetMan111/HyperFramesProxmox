@@ -21,6 +21,8 @@ CT_BRIDGE="${CT_BRIDGE:-vmbr0}"
 CT_CPU="${CT_CPU:-2}"
 CT_RAM="${CT_RAM:-4096}"
 CT_DISK="${CT_DISK:-20}"
+# Chrome-Rendering braucht /dev/shm (LXC-Default 64M ist zu klein) — tmpfs-Größe im Container
+CT_SHM="${CT_SHM:-512M}"
 # Netzwerk: DHCP Standard; statisch via IP_CIDR="192.168.178.60/24" GW="192.168.178.1"
 IP_CIDR="${IP_CIDR:-dhcp}"
 CT_GW="${CT_GW:-}"
@@ -159,10 +161,26 @@ chmod +x "$BASE/update.sh"
 chmod 600 "$BASE/.env"; chown -R hyperframes:hyperframes "$BASE" "$HDIR"
 echo "==> [CT] sudo-Regeln für UI-Verwaltung (Neustarts, Update — LAN-Box, dokumentiert in README)"
 cat > /etc/sudoers.d/hyperframes-suite <<'SUDO'
-hyperframes ALL=(root) NOPASSWD: /bin/systemctl restart hf-jobs, /bin/systemctl restart hf-studio, /bin/systemctl restart hf-studio-bridge, /bin/systemctl restart hf-gallery, /bin/systemctl restart hf-portal, /bin/systemctl restart omniroute, /opt/hyperframes/update.sh
+# Debian 12 (usrmerge): sudo löst "systemctl" nach /usr/bin/systemctl auf,
+# deshalb beide Pfade erlauben, sonst schlagen die UI-"Neu starten"-Buttons fehl.
+Cmnd_Alias HF_RESTART = /usr/bin/systemctl restart hf-jobs, /bin/systemctl restart hf-jobs, /usr/bin/systemctl restart hf-studio, /bin/systemctl restart hf-studio, /usr/bin/systemctl restart hf-studio-bridge, /bin/systemctl restart hf-studio-bridge, /usr/bin/systemctl restart hf-gallery, /bin/systemctl restart hf-gallery, /usr/bin/systemctl restart hf-portal, /bin/systemctl restart hf-portal, /usr/bin/systemctl restart omniroute, /bin/systemctl restart omniroute
+hyperframes ALL=(root) NOPASSWD: HF_RESTART, /opt/hyperframes/update.sh
 SUDO
 chmod 440 /etc/sudoers.d/hyperframes-suite
 visudo -c -q -f /etc/sudoers.d/hyperframes-suite || { echo "FEHLER: sudoers ungültig"; exit 1; }
+echo "==> [CT] /dev/shm vergrößern (Chrome-Rendering, LXC-Default 64M reicht nicht)"
+if [ -e /dev/shm ] && [ "$(mountpoint -q /dev/shm && echo yes || echo no)" = "yes" ]; then
+  if mount -o remount,size=${CT_SHM} /dev/shm; then
+    echo "/dev/shm auf $CT_SHM gesetzt"
+  else
+    echo "WARNUNG: /dev/shm remount fehlgeschlagen — Chrome-Rendering kann fehlschlagen. Manuell: mount -o remount,size=${CT_SHM} /dev/shm"
+  fi
+elif ! grep -qsE "[[:space:]]/dev/shm[[:space:]]" /proc/mounts; then
+  mkdir -p /dev/shm && mount -t tmpfs -o size=${CT_SHM} tmpfs /dev/shm && echo "/dev/shm als tmpfs ($CT_SHM) eingerichtet"
+else
+  echo "WARNUNG: /dev/shm ist kein tmpfs-Mount — Größe ungeprüft"
+fi
+df -h /dev/shm
 echo "==> [CT] Chrome + Doctor (Download ~115 MB + Entpacken — Fortschritt unten, bitte warten)"
 df -h / | tail -n 1
 CHROME_BIN="$(sudo -u hyperframes hyperframes browser path 2>/dev/null || true)"
@@ -272,11 +290,27 @@ for svc in $SVCS; do
     exit 1
   fi
 done
-for p in "$PORT_PORTAL" "$PORT_STUDIO_LAN" "$PORT_GALLERY"; do
+# Job-UI-Root (/) braucht Token (403) — daher nur Portal+Galerie auf 200 prüfen,
+# Job-UI separat via /healthz (siehe unten)
+for p in "$PORT_PORTAL" "$PORT_GALLERY"; do
   code="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$p/" || echo 000)"
   [ "$code" = "200" ] || { msg_error "Port $p antwortet mit HTTP $code"; exit 1; }
   msg_ok "Web UI :$p → HTTP $code"
 done
+# Studio-Brücke: socat antwortet immer, egal ob der Preview lebt — daher echt auf den Inhalt prüfen
+studio_code="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT_STUDIO_LAN/" || echo 000)"
+if [ "$studio_code" = "200" ]; then
+  studio_html="$(pct exec "$CT_ID" -- curl -s "http://127.0.0.1:$PORT_STUDIO_LAN/" || true)"
+  if printf '%s' "$studio_html" | grep -qiE "hyperframes|studio|preview"; then
+    msg_ok "Studio :3100 → HTTP 200 (Preview-Inhalt)"
+  else
+    msg_error "Studio :3100 liefert HTTP 200, aber keinen Preview-Inhalt — hf-studio (3002) prüfen"
+    exit 1
+  fi
+else
+  msg_error "Studio :$PORT_STUDIO_LAN antwortet mit HTTP $studio_code"
+  exit 1
+fi
 code="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT_JOBS/healthz" || echo 000)"
 [ "$code" = "200" ] || { msg_error "Job-UI (:$PORT_JOBS/healthz) antwortet mit HTTP $code"; exit 1; }
 msg_ok "Job-UI :$PORT_JOBS → HTTP $code (Healthcheck; UI selbst braucht Token)"

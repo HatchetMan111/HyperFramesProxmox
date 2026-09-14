@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 User=hyperframes
 WorkingDirectory=/opt/hyperframes
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EnvironmentFile=/opt/hyperframes/.env
 ExecStart=/usr/bin/node /opt/hyperframes/job-server.js
 Restart=always

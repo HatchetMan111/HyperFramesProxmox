@@ -587,7 +587,7 @@ const server = http.createServer(async (req, res) => {
     const logFile = path.join(BASE, "update.log");
     // Update läuft im Hintergrund (sudo); Status via Log
     fs.appendFileSync(logFile, "\n=== Update gestartet (UI) ===\n");
-    const upd = spawn("sudo", ["bash", path.join(BASE, "update.sh")]);
+    const upd = spawn("sudo", [path.join(BASE, "update.sh")]);
     const log = fs.createWriteStream(logFile, { flags: "a" });
     upd.stdout.on("data", (d) => log.write(d));
     upd.stderr.on("data", (d) => log.write(d));

@@ -7,7 +7,7 @@ Wants=network-online.target
 User=hyperframes
 WorkingDirectory=/opt/hyperframes
 Environment=PORT=20128
-ExecStart=/usr/bin/omniroute
+ExecStart=/usr/local/bin/omniroute
 Restart=always
 RestartSec=5
 

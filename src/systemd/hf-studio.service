@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 User=hyperframes
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 WorkingDirectory=/opt/hyperframes/studio-home
-ExecStart=/usr/bin/hyperframes preview /opt/hyperframes/studio-home --port 3002 --no-open --foreground
+ExecStart=/usr/local/bin/hyperframes preview /opt/hyperframes/studio-home --port 3002 --no-open --foreground
 Restart=always
 RestartSec=5
 
