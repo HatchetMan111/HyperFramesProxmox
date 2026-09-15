@@ -327,8 +327,23 @@ msg_ok "App-Installation im Container abgeschlossen"
 
 # ---------- Verifikation vom Host (mit Start-Wartezeit: Dienste brauchen bis ~60 s) ----------
 msg_info "Verifiziere Dienste + Web UIs"
+# curl gibt per -w IMMER einen Code aus (000 = keine Verbindung) — darum hier
+# kein "|| echo 000" (das würde den Code verdoppeln, z. B. "000000").
+http_code() { # $1 = URL — gibt HTTP-Code aus (200 / 403 / 000 …)
+  pct exec "$CT_ID" -- curl -s -o /dev/null -w "%{http_code}" "$1" 2>/dev/null || true
+}
+wait_http() { # $1 = Beschreibung, $2 = URL, $3 = erwarteter Code, $4 = Versuche, $5 = Pause(s)
+  local desc="$1" url="$2" want="$3" tries="${4:-12}" pause="${5:-5}" code="" i
+  for i in $(seq 1 "$tries"); do
+    code="$(http_code "$url")"
+    if [ "$code" = "$want" ]; then msg_ok "$desc → HTTP $code"; return 0; fi
+    sleep "$pause"
+  done
+  msg_error "$desc antwortet mit HTTP $code statt $want (nach $tries Versuchen)"
+  return 1
+}
 # shellcheck disable=SC2086  # SVCS ist bewusst wortgetrennt
-SVCS="hf-studio hf-gallery hf-jobs hf-portal"
+SVCS="hf-studio hf-studio-bridge hf-gallery hf-jobs hf-portal"
 if pct exec "$CT_ID" -- systemctl is-enabled omniroute.service >/dev/null 2>&1; then
   SVCS="$SVCS omniroute"
 else
@@ -349,29 +364,39 @@ for svc in $SVCS; do
   fi
 done
 # Job-UI-Root (/) braucht Token (403) — daher nur Portal+Galerie auf 200 prüfen,
-# Job-UI separat via /healthz (siehe unten)
+# Job-UI separat via /healthz (siehe unten). Mit Retry: Dienste brauchen nach
+# Kaltstart Zeit, bis sie HTTP liefern (v. a. Studio-Preview auf schwachen CTs).
 for p in "$PORT_PORTAL" "$PORT_GALLERY"; do
-  code="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$p/" || echo 000)"
-  [ "$code" = "200" ] || { msg_error "Port $p antwortet mit HTTP $code"; exit 1; }
-  msg_ok "Web UI :$p → HTTP $code"
+  wait_http "Web UI :$p" "http://127.0.0.1:$p/" 200 12 5 || exit 1
 done
-# Studio-Brücke: socat antwortet immer, egal ob der Preview lebt — daher echt auf den Inhalt prüfen
-studio_code="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT_STUDIO_LAN/" || echo 000)"
-if [ "$studio_code" = "200" ]; then
-  studio_html="$(pct exec "$CT_ID" -- curl -s "http://127.0.0.1:$PORT_STUDIO_LAN/" || true)"
-  if printf '%s' "$studio_html" | grep -qiE "hyperframes|studio|preview"; then
-    msg_ok "Studio :3100 → HTTP 200 (Preview-Inhalt)"
-  else
-    msg_error "Studio :3100 liefert HTTP 200, aber keinen Preview-Inhalt — hf-studio (3002) prüfen"
-    exit 1
+# Studio-Brücke: socat nimmt TCP an, auch wenn der Preview dahinter noch startet —
+# leere Antwort = 000. Darum mit Retry echt auf den Preview-Inhalt prüfen.
+studio_ok=0 studio_code="000"
+for i in $(seq 1 24); do
+  studio_code="$(http_code "http://127.0.0.1:$PORT_STUDIO_LAN/")"
+  if [ "$studio_code" = "200" ]; then
+    studio_html="$(pct exec "$CT_ID" -- curl -s "http://127.0.0.1:$PORT_STUDIO_LAN/" 2>/dev/null || true)"
+    if printf '%s' "$studio_html" | grep -qiE "hyperframes|studio|preview"; then
+      msg_ok "Studio :$PORT_STUDIO_LAN → HTTP 200 (Preview-Inhalt)"
+      studio_ok=1; break
+    fi
   fi
-else
-  msg_error "Studio :$PORT_STUDIO_LAN antwortet mit HTTP $studio_code"
+  sleep 5
+done
+if [ "$studio_ok" != "1" ]; then
+  msg_error "Studio :$PORT_STUDIO_LAN liefert keinen Preview-Inhalt (letzter Code: $studio_code)"
+  echo "--- Diagnose: Bridge + Preview ---"
+  pct exec "$CT_ID" -- systemctl is-active hf-studio-bridge hf-studio || true
+  pct exec "$CT_ID" -- bash -c 'ss -tlnp 2>/dev/null | grep -E "3002|3100" || netstat -tlnp 2>/dev/null | grep -E "3002|3100" || echo "(weder ss noch netstat verfügbar)"' || true
+  echo "--- Direkt-Test Preview :3002 (ohne Brücke) ---"
+  pct exec "$CT_ID" -- curl -s -o /dev/null -w "Preview :3002 → HTTP %{http_code}\n" http://127.0.0.1:3002/ 2>/dev/null || true
+  echo "--- journal hf-studio-bridge ---"
+  pct exec "$CT_ID" -- journalctl -u hf-studio-bridge -n 20 --no-pager || true
+  echo "--- journal hf-studio ---"
+  pct exec "$CT_ID" -- journalctl -u hf-studio -n 20 --no-pager || true
   exit 1
 fi
-code="$(pct exec "$CT_ID" -- curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT_JOBS/healthz" || echo 000)"
-[ "$code" = "200" ] || { msg_error "Job-UI (:$PORT_JOBS/healthz) antwortet mit HTTP $code"; exit 1; }
-msg_ok "Job-UI :$PORT_JOBS → HTTP $code (Healthcheck; UI selbst braucht Token)"
+wait_http "Job-UI :$PORT_JOBS (Healthcheck; UI selbst braucht Token)" "http://127.0.0.1:$PORT_JOBS/healthz" 200 12 5 || exit 1
 # OmniRoute-Health nur bei lokaler Installation (sonst nur Info, kein Abbruch)
 if pct exec "$CT_ID" -- systemctl is-enabled omniroute.service >/dev/null 2>&1; then
   if pct exec "$CT_ID" -- curl -sf -o /dev/null "http://127.0.0.1:$PORT_OMNI/v1/models"; then
