@@ -9,10 +9,10 @@ BASE=/opt/hyperframes
 # shellcheck disable=SC2154  # ec wird im trap zugewiesen
 trap 'ec=$?; echo "FEHLER (Exit $ec) bei: $BASH_COMMAND"; exit $ec' ERR
 
-npm update -g hyperframes
+npm install -g hyperframes@latest
 # OmniRoute nur aktualisieren, wenn lokal installiert (sonst fehlt das Paket -> npm abbruch)
 if command -v omniroute >/dev/null 2>&1; then
-  npm update -g omniroute
+  npm install -g omniroute@latest
 else
   echo "OmniRoute nicht lokal installiert — Update übersprungen (Remote-Instanz bleibt verbunden)."
 fi
@@ -21,6 +21,12 @@ for f in job-server.js portal.html env.example; do
   curl -fsSL "$REPO_RAW/src/$f" -o "$BASE/$f.new" && mv "$BASE/$f.new" "$BASE/$f"
 done
 
+# Aktuelle Ports sichern (Install-Script verdrahtet sie in Units/Portal/.env)
+CUR_PORTAL=$(grep -oP 'http\.server \K\d+' /etc/systemd/system/hf-portal.service 2>/dev/null || echo 8080)
+CUR_BRIDGE=$(grep -oP 'TCP-LISTEN:\K\d+' /etc/systemd/system/hf-studio-bridge.service 2>/dev/null || echo 3100)
+CUR_GAL=$(grep -oP '\-\-port \K\d+' /etc/systemd/system/hf-gallery.service 2>/dev/null || echo 3101)
+CUR_OMNI=$(grep -oP 'serve --port \K\d+' /etc/systemd/system/omniroute.service.d/exec.conf 2>/dev/null \
+  || grep -oP 'PORT=\K\d+' /etc/systemd/system/omniroute.service 2>/dev/null || echo 20128)
 # Units aktualisieren, aber maskierte Dienste nicht ungewollt freischalten
 for u in hf-studio.service hf-studio-bridge.service hf-gallery.service omniroute.service hf-jobs.service hf-portal.service hyperframes-suite.target; do
   if [ "$(systemctl is-enabled "$u" 2>/dev/null || echo unknown)" = "masked" ]; then
@@ -29,6 +35,15 @@ for u in hf-studio.service hf-studio-bridge.service hf-gallery.service omniroute
   fi
   curl -fsSL "$REPO_RAW/src/systemd/$u" -o "/etc/systemd/system/$u"
 done
+# Gesicherte Ports zurück in die frischen Units schreiben (kein Zurückfallen auf Defaults)
+sed -i "s/http.server 8080/http.server $CUR_PORTAL/" /etc/systemd/system/hf-portal.service
+sed -i "s/TCP-LISTEN:3100/TCP-LISTEN:$CUR_BRIDGE/" /etc/systemd/system/hf-studio-bridge.service
+sed -i "s/--port 3101/--port $CUR_GAL/" /etc/systemd/system/hf-gallery.service
+sed -i "s/Environment=PORT=20128/Environment=PORT=$CUR_OMNI/" /etc/systemd/system/omniroute.service
+if [ -f /etc/systemd/system/omniroute.service.d/exec.conf ]; then
+  sed -i "s/serve --port [0-9]*/serve --port $CUR_OMNI/" /etc/systemd/system/omniroute.service.d/exec.conf
+fi
+sed -i "s/data-port=\"3100\"/data-port=\"$CUR_BRIDGE\"/; s/data-port=\"3101\"/data-port=\"$CUR_GAL\"/; s/data-port=\"20128\"/data-port=\"$CUR_OMNI\"/" "$BASE/portal.html" 2>/dev/null || true
 cp "$BASE/portal.html" "$BASE/portal/index.html"
 chown -R hyperframes:hyperframes "$BASE"
 systemctl daemon-reload

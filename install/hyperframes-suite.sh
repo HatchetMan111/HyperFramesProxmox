@@ -26,7 +26,7 @@ CT_SHM="${CT_SHM:-512M}"
 # Netzwerk: DHCP Standard; statisch via IP_CIDR="192.168.178.60/24" GW="192.168.178.1"
 IP_CIDR="${IP_CIDR:-dhcp}"
 CT_GW="${CT_GW:-}"
-CT_DNS="${CT_DNS:-192.168.178.1}"
+CT_DNS="${CT_DNS:-1.1.1.1}"
 # Ports im Container (Portal = Einstieg; Studio horcht auf localhost:3002 und wird per socat auf :3100 ins LAN gebrückt — Ports stehen in src/systemd/)
 PORT_PORTAL=8080 PORT_STUDIO_LAN=3100 PORT_GALLERY=3101 PORT_JOBS=3120 PORT_OMNI=20128
 # OmniRoute: 0 = kein lokales Gateway installieren, nur per URL+Key mit einer
@@ -62,6 +62,12 @@ if pct status "$CT_ID" >/dev/null 2>&1; then
     [ "$hn" = "$CT_HOSTNAME" ] || { msg_error "CT $CT_ID heißt '$hn', erwartet '$CT_HOSTNAME' — Resume abgebrochen."; exit 1; }
     msg_info "Resume-Modus: CT $CT_ID ($hn) wird weiter eingerichtet, kein Neuaufbau"
     RESUME=1
+    # /dev/shm-Hostfix auch bei Resume sicherstellen (braucht Neustart zum Greifen)
+    CONF="/etc/pve/lxc/${CT_ID}.conf"
+    if [ -w "$CONF" ] && ! grep -q "dev/shm" "$CONF" 2>/dev/null; then
+      echo "lxc.mount.entry: tmpfs dev/shm tmpfs defaults,size=${CT_SHM},mode=1777,create=dir 0 0" >> "$CONF"
+      msg_info "/dev/shm-Hostfix nachgetragen ($CT_SHM) — greift erst nach CT-Neustart"
+    fi
     if [ "$(pct status "$CT_ID" 2>/dev/null | awk '{print $2}')" != "running" ]; then
       msg_info "CT $CT_ID ist gestoppt — starte"
       pct start "$CT_ID"
@@ -82,8 +88,10 @@ fi
 
 # ---------- Template sicherstellen (nur bei Neuaufbau nötig) ----------
 if [ "$RESUME" = "0" ]; then
-TPL="$(pveam available -section system 2>/dev/null | grep -o "debian-12-standard_[^ ]*amd64.tar.zst" | sort -V | tail -n 1 || true)"
-[ -n "$TPL" ] || { msg_error "Kein debian-12-Template im Katalog gefunden."; exit 1; }
+msg_info "Aktualisiere Template-Katalog (pveam update)"
+pveam update >/dev/null 2>&1 || msg_info "pveam update meldete Warnungen — weiter mit lokalem Katalog"
+TPL="$(pveam available -section system 2>/dev/null | grep -o "debian-12-standard_[^ ]*amd64\.tar\.\(zst\|gz\|xz\)" | sort -V | tail -n 1 || true)"
+[ -n "$TPL" ] || { msg_error "Kein debian-12-Template im Katalog gefunden (pveam available -section system prüfen)."; exit 1; }
 if ! pveam list "$CT_TEMPLATE_STORAGE" 2>/dev/null | grep -q "debian-12-standard"; then
   msg_info "Lade Template $TPL"
   pveam download "$CT_TEMPLATE_STORAGE" "$TPL"
@@ -92,12 +100,32 @@ msg_ok "Template bereit: $TPL"
 
 # ---------- Container erstellen ----------
 NET="name=eth0,bridge=$CT_BRIDGE"
-if [ "$IP_CIDR" = "dhcp" ]; then NET="$NET,ip=dhcp"; else NET="$NET,ip=$IP_CIDR,gw=$CT_GW"; fi
+if [ "$IP_CIDR" = "dhcp" ]; then
+  NET="$NET,ip=dhcp"
+else
+  [ -n "$CT_GW" ] || { msg_error "Statische IP ($IP_CIDR) braucht CT_GW (z. B. CT_GW=\"192.168.178.1\")."; exit 1; }
+  NET="$NET,ip=$IP_CIDR,gw=$CT_GW"
+fi
+# DNS: leer lassen = Host-Einstellung vererben; sonst explizit setzen
+NS_OPT=()
+if [ -n "${CT_DNS:-}" ]; then NS_OPT=(--nameserver "$CT_DNS"); fi
 msg_info "Erstelle CT $CT_ID ($CT_HOSTNAME, ${CT_CPU}C/${CT_RAM}MB/${CT_DISK}GB)"
 pct create "$CT_ID" "${CT_TEMPLATE_STORAGE}:vztmpl/$TPL" \
   --hostname "$CT_HOSTNAME" --cores "$CT_CPU" --memory "$CT_RAM" --swap 1024 \
   --rootfs "${CT_STORAGE}:${CT_DISK}" --net0 "$NET" \
-  --nameserver "$CT_DNS" --unprivileged 1 --features nesting=1 --onboot 1 --start 1
+  "${NS_OPT[@]}" --unprivileged 1 --features nesting=1 --onboot 1 --start 0
+# /dev/shm für Chrome-Rendering auf dem Host fest verdrahten (im unpriv. LXC
+# schlägt ein Remount von innen meist fehl) — zusätzlich versucht es der CT unten.
+CONF="/etc/pve/lxc/${CT_ID}.conf"
+if [ -w "$CONF" ]; then
+  if ! grep -q "dev/shm" "$CONF" 2>/dev/null; then
+    echo "lxc.mount.entry: tmpfs dev/shm tmpfs defaults,size=${CT_SHM},mode=1777,create=dir 0 0" >> "$CONF"
+    msg_ok "/dev/shm im Host-Config auf $CT_SHM gesetzt"
+  fi
+else
+  msg_info "WARNUNG: $CONF nicht beschreibbar — /dev/shm-Hostfix übersprungen"
+fi
+pct start "$CT_ID"
 msg_ok "Container erstellt und gestartet"
 
 # Auf CT + IP warten (max. 120 s — DHCP kann dauern; if-Bedingungen sind set -e-sicher)
@@ -118,7 +146,8 @@ msg_ok "CT-IP: $CT_IP"
 # ---------- Setup im Container (alles aus GitHub, nichts fest verdrahtet) ----------
 msg_info "Installiere App im Container (ca. 10–15 Min.)"
 pct exec "$CT_ID" -- env REPO_RAW="$REPO_RAW" INSTALL_OMNIROUTE="$INSTALL_OMNIROUTE" \
-  PORT_PORTAL="$PORT_PORTAL" PORT_GALLERY="$PORT_GALLERY" PORT_JOBS="$PORT_JOBS" PORT_OMNI="$PORT_OMNI" \
+  PORT_PORTAL="$PORT_PORTAL" PORT_STUDIO_LAN=3100 PORT_GALLERY="$PORT_GALLERY" PORT_JOBS="$PORT_JOBS" PORT_OMNI="$PORT_OMNI" \
+  CT_SHM="$CT_SHM" \
   bash -s <<'CTEOF'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive PATH="/usr/local/bin:$PATH"
@@ -158,6 +187,9 @@ cp "$BASE/portal.html" "$BASE/portal/index.html"
 curl -fsSL "$REPO_RAW/install/update.sh" -o "$BASE/update.sh"
 chmod +x "$BASE/update.sh"
 [ -f "$BASE/.env" ] || { cp "$BASE/env.example" "$BASE/.env"; sed -i "s/^JOB_TOKEN=.*/JOB_TOKEN=$(openssl rand -hex 16)/" "$BASE/.env"; }
+# .env auf die gewählten Ports synchronisieren (sonst läuft hf-jobs auf 3120 trotz PORT_JOBS)
+if grep -q "^JOB_PORT=" "$BASE/.env"; then sed -i "s/^JOB_PORT=.*/JOB_PORT=$PORT_JOBS/" "$BASE/.env";
+else echo "JOB_PORT=$PORT_JOBS" >> "$BASE/.env"; fi
 chmod 600 "$BASE/.env"; chown -R hyperframes:hyperframes "$BASE" "$HDIR"
 echo "==> [CT] sudo-Regeln für UI-Verwaltung (Neustarts, Update — LAN-Box, dokumentiert in README)"
 cat > /etc/sudoers.d/hyperframes-suite <<'SUDO'
@@ -168,15 +200,18 @@ hyperframes ALL=(root) NOPASSWD: HF_RESTART, /opt/hyperframes/update.sh
 SUDO
 chmod 440 /etc/sudoers.d/hyperframes-suite
 visudo -c -q -f /etc/sudoers.d/hyperframes-suite || { echo "FEHLER: sudoers ungültig"; exit 1; }
-echo "==> [CT] /dev/shm vergrößern (Chrome-Rendering, LXC-Default 64M reicht nicht)"
+echo "==> [CT] /dev/shm prüfen (Chrome-Rendering, Ziel: ${CT_SHM:-512M} — Host-Config wurde auf dem Proxmox-Host gesetzt)"
 if [ -e /dev/shm ] && [ "$(mountpoint -q /dev/shm && echo yes || echo no)" = "yes" ]; then
-  if mount -o remount,size=${CT_SHM} /dev/shm; then
-    echo "/dev/shm auf $CT_SHM gesetzt"
+  if mount -o remount,size="${CT_SHM:-512M}" /dev/shm 2>/dev/null; then
+    echo "/dev/shm auf ${CT_SHM:-512M} gesetzt"
   else
-    echo "WARNUNG: /dev/shm remount fehlgeschlagen — Chrome-Rendering kann fehlschlagen. Manuell: mount -o remount,size=${CT_SHM} /dev/shm"
+    echo "Hinweis: /dev/shm-Remount von innen verweigert (normal im unpriv. LXC) — Host-Eintrag (lxc.mount.entry) greift nach CT-Neustart. Aktuell:"
+    df -h /dev/shm || true
   fi
 elif ! grep -qsE "[[:space:]]/dev/shm[[:space:]]" /proc/mounts; then
-  mkdir -p /dev/shm && mount -t tmpfs -o size=${CT_SHM} tmpfs /dev/shm && echo "/dev/shm als tmpfs ($CT_SHM) eingerichtet"
+  mkdir -p /dev/shm && mount -t tmpfs -o size="${CT_SHM:-512M}" tmpfs /dev/shm 2>/dev/null \
+    && echo "/dev/shm als tmpfs (${CT_SHM:-512M}) eingerichtet" \
+    || echo "WARNUNG: /dev/shm konnte nicht eingerichtet werden — Chrome-Rendering kann fehlschlagen"
 else
   echo "WARNUNG: /dev/shm ist kein tmpfs-Mount — Größe ungeprüft"
 fi
@@ -224,44 +259,67 @@ echo "Chrome-Start OK"
 df -h /dev/shm
 sudo -u hyperframes hyperframes doctor 2>&1 | tail -n 15 || true
 echo "==> [CT] Studio-Starterprojekt"
-(cd "$BASE/projects" && sudo -u hyperframes HYPERFRAMES_SKIP_SKILLS=1 hyperframes init studio-home --example blank --non-interactive >/dev/null 2>&1 || true)
-cp -r "$BASE/projects/studio-home/." "$BASE/studio-home/" 2>/dev/null || true
-chown -R hyperframes:hyperframes "$BASE/studio-home"
-[ -f "$BASE/studio-home/index.html" ] || echo "WARNUNG: studio-home/index.html fehlt — Studio startet ggf. leer (Prüfung: ls $BASE/studio-home)"
+if [ -f "$BASE/studio-home/index.html" ]; then
+  echo "studio-home existiert bereits — init übersprungen (Resume)"
+else
+  (cd "$BASE/projects" && sudo -u hyperframes HYPERFRAMES_SKIP_SKILLS=1 hyperframes init studio-home --example blank --non-interactive >/dev/null 2>&1 || true)
+  cp -r "$BASE/projects/studio-home/." "$BASE/studio-home/" 2>/dev/null || true
+  chown -R hyperframes:hyperframes "$BASE/studio-home"
+  [ -f "$BASE/studio-home/index.html" ] || echo "WARNUNG: studio-home/index.html fehlt — Studio startet ggf. leer (Prüfung: ls $BASE/studio-home)"
+fi
 echo "==> [CT] Dienste aktivieren"
 cp "$BASE/systemd/"*.service "$BASE/systemd/"*.target /etc/systemd/system/
+echo "==> [CT] Ports in Units + Portal verdrahten ($PORT_PORTAL/3100/$PORT_GALLERY/$PORT_JOBS/$PORT_OMNI)"
+sed -i "s/--port 3101/--port $PORT_GALLERY/" /etc/systemd/system/hf-gallery.service
+sed -i "s/TCP-LISTEN:3100/TCP-LISTEN:$PORT_STUDIO_LAN/" /etc/systemd/system/hf-studio-bridge.service
+sed -i "s/http.server 8080/http.server $PORT_PORTAL/" /etc/systemd/system/hf-portal.service
+sed -i "s/Environment=PORT=20128/Environment=PORT=$PORT_OMNI/" /etc/systemd/system/omniroute.service
+sed -i "s/\"PORT_STUDIO_LAN\":3100/\"PORT_STUDIO_LAN\":$PORT_STUDIO_LAN/; s/:3100\\//:$PORT_STUDIO_LAN\\//g; s/:3101\\//:$PORT_GALLERY\\//g; s/:3120/:$PORT_JOBS/g; s/:20128/:$PORT_OMNI/g" "$BASE/portal.html" 2>/dev/null || true
+sed -i "s/data-port=\"3100\"/data-port=\"$PORT_STUDIO_LAN\"/; s/data-port=\"3101\"/data-port=\"$PORT_GALLERY\"/; s/data-port=\"20128\"/data-port=\"$PORT_OMNI\"/" "$BASE/portal.html" 2>/dev/null || true
+cp "$BASE/portal.html" "$BASE/portal/index.html"
 echo "==> [CT] OmniRoute-Startform erkennen (nur wenn lokal installiert)"
 if command -v omniroute >/dev/null 2>&1; then
   OMNI_BIN="$(command -v omniroute)"
   if "$OMNI_BIN" --help 2>&1 | grep -wq "serve"; then
     mkdir -p /etc/systemd/system/omniroute.service.d
-    printf '[Service]\nExecStart=\nExecStart=%s serve --port 20128\n' "$OMNI_BIN" > /etc/systemd/system/omniroute.service.d/exec.conf
-    echo "OmniRoute nutzt 'serve'-Modus"
+    printf '[Service]\nExecStart=\nExecStart=%s serve --port %s\n' "$OMNI_BIN" "$PORT_OMNI" > /etc/systemd/system/omniroute.service.d/exec.conf
+    echo "OmniRoute nutzt 'serve'-Modus (Port $PORT_OMNI)"
   else
     echo "OmniRoute nutzt Standard-Start (Port per ENV)"
   fi
+  systemctl unmask omniroute.service 2>/dev/null || true
   systemctl enable omniroute.service 2>/dev/null || true
 else
   echo "OmniRoute nicht lokal installiert — Dienst wird maskiert (Remote-Instanz in Job-UI Einstellungen verbinden)"
   systemctl mask omniroute.service 2>/dev/null || true
+  # Maskierte Units in Wants würden das Target in degraded versetzen — Override ohne omniroute
+  mkdir -p /etc/systemd/system/hyperframes-suite.target.d
+  printf '[Unit]\nWants=hf-studio.service hf-studio-bridge.service hf-gallery.service hf-jobs.service hf-portal.service\n' > /etc/systemd/system/hyperframes-suite.target.d/no-omniroute.conf
 fi
 if [ ! -f "$BASE/filebrowser.db" ]; then
   sudo -u hyperframes filebrowser config init --address 0.0.0.0 --port "$PORT_GALLERY" --root "$BASE/gallery" --database "$BASE/filebrowser.db" >/dev/null
   GALPW=$(openssl rand -base64 12); echo "$GALPW" > "$BASE/gallery-pass.txt"; chmod 600 "$BASE/gallery-pass.txt"; chown hyperframes:hyperframes "$BASE/gallery-pass.txt"
-  sudo -u hyperframes filebrowser users add admin "$GALPW" --database "$BASE/filebrowser.db" >/dev/null
-  sudo -u hyperframes filebrowser users update admin --perm.admin=true --database "$BASE/filebrowser.db" >/dev/null
+  if ! sudo -u hyperframes filebrowser users add admin "$GALPW" --perm.admin --database "$BASE/filebrowser.db" >/dev/null 2>&1; then
+    sudo -u hyperframes filebrowser users add admin "$GALPW" --database "$BASE/filebrowser.db" >/dev/null
+    sudo -u hyperframes filebrowser users update admin --perm.admin --database "$BASE/filebrowser.db" >/dev/null
+  fi
 fi
 systemctl daemon-reload
 systemctl enable --now hyperframes-suite.target
 echo "==> [CT] Firewall (Heimnetz)"
-ufw --force enable >/dev/null 2>&1 || true
 IFACE=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' || echo eth0)
-LAN=$(ip -o -f inet addr show "$IFACE" 2>/dev/null | awk '{print $4}' | head -n 1 | sed 's|\.[0-9]*/|.0/|' | tr -d ' ')
-if [ -z "$LAN" ]; then
-  echo "WARNUNG: LAN-Netz nicht ermittelbar (Interface $IFACE) — UFW-Regeln übersprungen, Ports nur per Proxmox-Firewall schützen!"
-else
-  for p in "$PORT_PORTAL" 3100 "$PORT_GALLERY" "$PORT_JOBS" "$PORT_OMNI"; do ufw allow from "$LAN" to any port "$p" proto tcp >/dev/null; done
+CIDR=$(ip -o -f inet addr show "$IFACE" 2>/dev/null | awk '{print $4}' | head -n 1)
+LAN=""
+if [ -n "$CIDR" ]; then
+  LAN=$(python3 -c "import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]).network)" "$CIDR" 2>/dev/null || true)
+fi
+ufw --force enable >/dev/null 2>&1 || true
+if [ -n "$LAN" ]; then
+  for p in "$PORT_PORTAL" "$PORT_STUDIO_LAN" "$PORT_GALLERY" "$PORT_JOBS" "$PORT_OMNI"; do ufw allow from "$LAN" to any port "$p" proto tcp >/dev/null; done
   echo "UFW-Regeln für $LAN gesetzt"
+else
+  echo "WARNUNG: LAN-Netz nicht ermittelbar (Interface $IFACE, CIDR '$CIDR') — Ports werden offen freigegeben (LAN-Box, zusätzlich per Proxmox-Firewall schützen!)"
+  for p in "$PORT_PORTAL" "$PORT_STUDIO_LAN" "$PORT_GALLERY" "$PORT_JOBS" "$PORT_OMNI"; do ufw allow "$p"/tcp >/dev/null 2>&1 || true; done
 fi
 echo "[CT] FERTIG"
 CTEOF

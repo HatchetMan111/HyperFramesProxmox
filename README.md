@@ -79,7 +79,7 @@ pct stop 210 && pct destroy 210   # ID anpassen
 
 ## Testprotokoll (nach Installation abhaken)
 
-- [ ] `pct exec 210 -- systemctl is-active hf-studio hf-gallery omniroute hf-jobs hf-portal` → 5× `active`
+- [ ] `pct exec 210 -- systemctl is-active hf-studio hf-gallery hf-jobs hf-portal` → 4× `active` (+ `omniroute` nur bei `INSTALL_OMNIROUTE=1`)
 - [ ] Alle 5 URLs aus dem Heimnetz erreichbar (Portal klickbar)
 - [ ] Job-UI: Testauftrag mit OmniRoute → Entwurf + Snapshots sichtbar
 - [ ] Reboot: `pct reboot 210`, 2 Min. warten → alle URLs wieder grün

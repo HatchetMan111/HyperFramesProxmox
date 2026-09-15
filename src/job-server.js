@@ -121,14 +121,22 @@ async function fetchModels(provider) {
 function extractHTML(text) {
   const m = text.match(/```html\s*([\s\S]*?)```/i);
   const html = (m ? m[1] : text).trim();
-  if (html.includes("data-composition-id") && html.includes("__timelines")) return html;
-  return null;
+  if (!html.includes("data-composition-id")) return null;
+  return html;
 }
 function compositionDuration(html) {
-  const m = html.match(/data-composition-id[^>]*data-duration="([\d.]+)"/)
-    || html.match(/data-duration="([\d.]+)"[^>]*data-composition-id/);
+  const m = html.match(/data-composition-id[^>]*data-duration=["']([\d.]+)["']/)
+    || html.match(/data-duration=["']([\d.]+)["'][^>]*data-composition-id/);
   const d = m ? parseFloat(m[1]) : 10;
   return d > 0 && d <= 600 ? d : 10;
+}
+function listSnapshots(jobDir, subDir) {
+  try {
+    return fs.readdirSync(path.join(jobDir, subDir))
+      .filter((f) => /^frame-.*\.png$/i.test(f))
+      .sort()
+      .slice(0, 12);
+  } catch { return []; }
 }
 function snapshotTimes(d) {
   const r = (x) => Math.round(x * 10) / 10;
@@ -223,7 +231,7 @@ function systemPage(tok, states, vers, msg) {
   const rows = states.map((s) =>
     `<div class="card" style="display:flex;align-items:center;gap:12px">`
     + `${s.active ? '<span class="ok">● aktiv</span>' : '<span class="err">● gestoppt</span>'} <b>${esc(s.name)}</b>`
-    + `<form method="post" action="/system/restart?token=${tok}" style="margin-left:auto">`
+    + `<form method="post" action="/system/restart?token=${esc(tok)}" style="margin-left:auto">`
     + `<input type="hidden" name="svc" value="${esc(s.name)}">`
     + `<button style="margin:0;padding:8px 18px">Neu starten</button></form></div>`).join("");
   return page("System", "sys", tok, `
@@ -234,17 +242,17 @@ ${msg ? `<div class="card">${msg}</div>` : ""}
 <h2>Dienste</h2>${rows}
 <div class="card"><h2>Job-UI-Token wechseln</h2>
 <p class="mut">Neues Token speichern → Dienst startet automatisch neu → danach mit neuem Token anmelden.</p>
-<form method="post" action="/system/token?token=${tok}">
+<form method="post" action="/system/token?token=${esc(tok)}">
 <input type="text" name="newtoken" required minlength="12" placeholder="Neues Token (min. 12 Zeichen)">
 <button>Token wechseln + neu starten</button></form></div>
 <div class="card"><h2>Galerie-Passwort neu setzen</h2>
-<form method="post" action="/system/gallery-password?token=${tok}">
-<input type="text" name="newpw" required minlength="8" placeholder="Neues Galerie-Passwort">
+<form method="post" action="/system/gallery-password?token=${esc(tok)}">
+<input type="text" name="newpw" required minlength="12" placeholder="Neues Galerie-Passwort (min. 12 Zeichen)">
 <button>Passwort setzen</button></form></div>
 <div class="card"><h2>Update aus GitHub</h2>
 <p class="mut">Holt update.sh aus dem Repo und führt es aus (Log unten). Dauert Minuten.</p>
-<form method="post" action="/system/update?token=${tok}"><button>Update starten</button></form>
-<p><a class="btn sec" href="/system/update-log?token=${tok}">Update-Log ansehen</a></p></div>`);
+<form method="post" action="/system/update?token=${esc(tok)}"><button>Update starten</button></form>
+<p><a class="btn sec" href="/system/update-log?token=${esc(tok)}">Update-Log ansehen</a></p></div>`);
 }
 
 /* ---------- Pipeline ---------- */
@@ -280,20 +288,26 @@ async function pipeline(id, opts) {
       say("WARNUNG: kein gültiges HTML erkannt — leeres Gerüst + behandlung.md");
     }
 
+    if (!html.includes("__timelines")) say("WARNUNG: Entwurf ohne __timelines-Timeline — Vorschau/Render evtl. statisch (siehe Log)");
     set({ step: "lint + Snapshots …" });
     say("lint + Snapshots laufen");
     const lintCode = await run("hyperframes", ["lint"], projDir, logFile);
     if (lintCode !== 0) say("WARNUNG: lint meldet Fehler (siehe Log) — trotzdem weiter");
     const times = snapshotTimes(duration);
     set({ times: times.split(","), duration });
-    const snapCode = await run("hyperframes", ["snapshot", "--at", times, "--no-end", "-o", "entwurf"], projDir, logFile);
+    // Absolute Pfade: hyperframes löst -o gegen process.cwd() auf, nicht gegen das
+    // Spawn-cwd — relative Pfade würden nach /opt/hyperframes schreiben und die
+    // Statusseite fände keine Snapshots.
+    const snapDir = path.join(projDir, "entwurf");
+    const snapCode = await run("hyperframes", ["snapshot", "--at", times, "--no-end", "-o", snapDir], projDir, logFile);
     if (snapCode !== 0) say("WARNUNG: Snapshot fehlgeschlagen (Exit " + snapCode + ") — meist fehlt Chrome: im CT 'sudo -u hyperframes hyperframes browser ensure' ausführen");
 
     if (opts.render) {
       set({ step: "rendere MP4 (dauert Minuten) …" });
       say("Render startet");
-      const code = await run("hyperframes", ["render", "-o", "ergebnis.mp4"], projDir, logFile);
-      const mp4 = path.join(projDir, "ergebnis.mp4");
+      const outMp4 = path.join(projDir, "ergebnis.mp4");
+      const code = await run("hyperframes", ["render", "-o", outMp4], projDir, logFile);
+      const mp4 = outMp4;
       if (code === 0 && fs.existsSync(mp4)) {
         fs.copyFileSync(mp4, path.join(GALLERY, "job-" + id + ".mp4"));
         set({ mp4: "job-" + id + ".mp4" });
@@ -324,10 +338,13 @@ img.shot{max-width:100%;border-radius:10px;margin:8px 0;border:1px solid #333}
 pre.log{background:#0d0d0d;border:1px solid #333;border-radius:10px;padding:14px;overflow:auto;max-height:300px;font-size:13px}
 .prov{display:flex;gap:14px}.prov label{flex:1;background:#0d0d0d;border:2px solid #444;border-radius:12px;padding:14px;cursor:pointer;margin:0}
 .prov input{accent-color:#7ED957}`;
-const NAV = (on, tok) => `<nav><a href="/?token=${tok}" class="${on === "neu" ? "on" : ""}">＋ Neu</a>`
-  + `<a href="/jobs-list?token=${tok}" class="${on === "jobs" ? "on" : ""}">Aufträge</a>`
-  + `<a href="/einstellungen?token=${tok}" class="${on === "set" ? "on" : ""}">⚙ KI-Keys</a>`
-  + `<a href="/system?token=${tok}" class="${on === "sys" ? "on" : ""}">🖥 System</a></nav>`;
+const NAV = (on, tok) => {
+  const t = esc(tok);
+  return `<nav><a href="/?token=${t}" class="${on === "neu" ? "on" : ""}">＋ Neu</a>`
+  + `<a href="/jobs-list?token=${t}" class="${on === "jobs" ? "on" : ""}">Aufträge</a>`
+  + `<a href="/einstellungen?token=${t}" class="${on === "set" ? "on" : ""}">⚙ KI-Keys</a>`
+  + `<a href="/system?token=${t}" class="${on === "sys" ? "on" : ""}">🖥 System</a></nav>`;
+};
 const page = (title, on, tok, body) => `<!doctype html><html lang="de"><head><meta charset="utf-8">`
   + `<meta name="viewport" content="width=device-width,initial-scale=1"><title>${title} · Hyperframes</title>`
   + `<style>${CSS}</style></head><body><h1>🎬 Hyperframes Job-UI</h1>${NAV(on, tok)}${body}</body></html>`;
@@ -336,7 +353,7 @@ function formPage(tok, s) {
   const orOk = !!s.openrouterKey, omniLocal = s.omniUrl.includes("127.0.0.1") || s.omniUrl.includes("localhost");
   return page("Neuer Auftrag", "neu", tok, `
 <h2>Prompt → Video</h2>
-<form method="post" action="/job?token=${tok}">
+<form method="post" action="/job?token=${esc(tok)}">
 <label>Videowunsch</label>
 <textarea name="prompt" rows="4" required placeholder="z. B. 30s Produkt-Clip für den Hofladen, Marke grün/gelb …"></textarea>
 <div style="display:flex;gap:14px">
@@ -348,7 +365,7 @@ function formPage(tok, s) {
 <label>KI-Anbieter</label>
 <div class="prov">
 <label><input type="radio" name="provider" value="omniroute" checked> <b>OmniRoute</b><br>
-<span class="mut">${esc(omniLocal ? "lokal, Free-Tiers" : esc(s.omniUrl))}${s.omniKey ? " · Key hinterlegt" : ""}</span></label>
+<span class="mut">${esc(omniLocal ? "lokal, Free-Tiers" : s.omniUrl)}${s.omniKey ? " · Key hinterlegt" : ""}</span></label>
 <label><input type="radio" name="provider" value="openrouter"> <b>OpenRouter</b><br>
 <span class="mut">${orOk ? "Key hinterlegt ✓" : "⚠ kein Key — in Einstellungen eintragen"}</span></label>
 </div>
@@ -361,7 +378,7 @@ function settingsPage(tok, s, msg) {
   return page("Einstellungen", "set", tok, `
 <h2>⚙ KI-Anbieter einrichten</h2>
 ${msg ? `<div class="card">${msg}</div>` : ""}
-<form method="post" action="/einstellungen?token=${tok}">
+<form method="post" action="/einstellungen?token=${esc(tok)}">
 <div class="card"><h2>OpenRouter</h2>
 <label>API-Token <span class="mut">(aktuell: ${esc(mask(s.openrouterKey))})</span></label>
 <input type="password" name="openrouterKey" placeholder="sk-or-… (leer = unverändert)" autocomplete="off">
@@ -371,7 +388,7 @@ ${msg ? `<div class="card">${msg}</div>` : ""}
 <input type="text" id="q-openrouter" placeholder="🔍 Modelle suchen …" oninput="filterMods('openrouter')">
 <div style="display:flex;gap:10px;margin-top:8px">
 <button type="button" class="btn sec" style="margin:0" onclick="loadMods('openrouter')">Liste laden</button>
-<a class="btn sec" style="margin:0" href="/test?provider=openrouter&token=${tok}">Verbindung testen</a></div>
+<a class="btn sec" style="margin:0" href="/test?provider=openrouter&token=${esc(tok)}">Verbindung testen</a></div>
 <div id="list-openrouter" class="modlist"><span class="mut">Noch nicht geladen.</span></div></div>
 <div class="card"><h2>OmniRoute-Instanz</h2>
 <label>Basis-URL <span class="mut">(eigene Instanz oder lokal)</span></label>
@@ -384,7 +401,7 @@ ${msg ? `<div class="card">${msg}</div>` : ""}
 <input type="text" id="q-omniroute" placeholder="🔍 Modelle suchen …" oninput="filterMods('omniroute')">
 <div style="display:flex;gap:10px;margin-top:8px">
 <button type="button" class="btn sec" style="margin:0" onclick="loadMods('omniroute')">Liste laden</button>
-<a class="btn sec" style="margin:0" href="/test?provider=omniroute&token=${tok}">Verbindung testen</a></div>
+<a class="btn sec" style="margin:0" href="/test?provider=omniroute&token=${esc(tok)}">Verbindung testen</a></div>
 <div id="list-omniroute" class="modlist"><span class="mut">Noch nicht geladen.</span></div></div>
 <button>Speichern</button></form>
 <p class="mut">Gespeichert in <code>settings.json</code> (0600, nur lesbar für den Dienst). „__LEEREN__" als Key löscht ihn. Datei-Einträge aus <code>.env</code> gelten als Fallback.</p>
@@ -476,7 +493,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(
         page("Verbindungstest", "set", qTok,
           `<h2>Test: ${provider}</h2><div class="card">${r.ok ? `<span class="ok">✓ OK</span> — ${esc(r.info)}` : `<span class="err">✘ Fehlgeschlagen</span> — ${esc(r.info)}`}</div>`
-          + `<p><a class="btn sec" href="/einstellungen?token=${qTok}">Zurück</a></p>`));
+          + `<p><a class="btn sec" href="/einstellungen?token=${esc(qTok)}">Zurück</a></p>`));
     });
     return;
   }
@@ -489,8 +506,16 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "GET" && u.pathname === "/jobs-list") {
     if (!needAuth()) return;
-    const items = [...tasks.entries()].reverse().map(([id, t]) =>
-      `<div class="card">${chip(t.state)} <a href="/status?id=${id}&token=${qTok}"><b>${id}</b></a><br>`
+    // Aufträge vom Datenträger mit einbeziehen (Tasks im Speicher gehen bei Neustart verloren)
+    const known = new Map(tasks);
+    try {
+      for (const d of fs.readdirSync(JOBS)) {
+        if (/^[a-z0-9]+$/i.test(d) && !known.has(d) && fs.statSync(path.join(JOBS, d)).isDirectory())
+          known.set(d, { state: "done", step: "aus früherer Sitzung (Log einsehen)", prompt: "" });
+      }
+    } catch { /* Jobs-Verzeichnis fehlt noch */ }
+    const items = [...known.entries()].reverse().map(([id, t]) =>
+      `<div class="card">${chip(t.state)} <a href="/status?id=${esc(id)}&token=${esc(qTok)}"><b>${esc(id)}</b></a><br>`
       + `<span class="mut">${esc(t.prompt || "")}</span><br>${esc(t.step || "")}</div>`).join("");
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
       .end(page("Aufträge", "jobs", qTok, items || "<p>Keine Aufträge.</p>"));
@@ -505,11 +530,10 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(t));
       return;
     }
-    const shots = (t.times || ["1", "5", "10"]).map((at, i) => {
-      const f = "projekt/entwurf/frame-0" + i + "-at-" + at + "s.png";
-      return fs.existsSync(path.join(JOBS, id, f))
-        ? `<img class="shot" src="/jobs/${id}/${f}?token=${qTok}">` : "";
-    }).join("");
+    const found = listSnapshots(path.join(JOBS, id, "projekt"), "entwurf");
+    const shots = (found.length ? found : (t.times || []).map((at, i) => "frame-0" + i + "-at-" + at + "s.png"))
+      .filter((f) => fs.existsSync(path.join(JOBS, id, "projekt", "entwurf", f)))
+      .map((f) => `<img class="shot" src="/jobs/${esc(id)}/projekt/entwurf/${esc(f)}?token=${esc(qTok)}">`).join("");
     const noShots = !shots
       ? `<div class="card"><span class="err">Keine Snapshots gefunden.</span> Typische Ursachen: Chrome fehlt im CT
         (<code>sudo -u hyperframes hyperframes browser ensure</code>), Lint-Fehler im Entwurf oder LLM lieferte kein HTML.
@@ -525,12 +549,17 @@ const server = http.createServer(async (req, res) => {
         `<h2>Auftrag ${esc(id)}</h2><p>${chip(t.state)} — ${esc(t.step || "")}</p>`
         + (t.state === "running" ? `<meta http-equiv="refresh" content="5">` : "")
         + mp4 + noShots + shots + logTail
-        + `<p><a class="btn sec" href="/jobs/${id}/task.log?token=${qTok}">Voll-Log</a></p>`));
+        + `<p><a class="btn sec" href="/jobs/${esc(id)}/task.log?token=${esc(qTok)}">Voll-Log</a></p>`));
     return;
   }
   if (req.method === "GET" && u.pathname.startsWith("/jobs/")) {
     if (!needAuth()) return;
-    const fp = path.normalize(path.join(JOBS, decodeURIComponent(u.pathname.slice(6))));
+    let rel;
+    try {
+      rel = decodeURIComponent(u.pathname.slice(6));
+    } catch { res.writeHead(400).end("ungültige URL-Kodierung"); return; }
+    if (rel.includes("\0")) { res.writeHead(400).end("ungültig"); return; }
+    const fp = path.normalize(path.join(JOBS, rel));
     if (!fp.startsWith(JOBS) || !fs.existsSync(fp) || fs.statSync(fp).isDirectory()) {
       res.writeHead(404).end("nicht gefunden"); return;
     }
@@ -573,7 +602,7 @@ const server = http.createServer(async (req, res) => {
     if (!needAuth()) return;
     bodyOf().then(async (b) => {
       const pw = (new URLSearchParams(b).get("newpw") || "").trim();
-      if (pw.length < 8) { res.writeHead(400).end("Passwort zu kurz (min. 8)"); return; }
+      if (pw.length < 12) { res.writeHead(400).end("Passwort zu kurz (min. 12, FileBrowser-Vorgabe)"); return; }
       const r = await shCapture("filebrowser", ["users", "update", "admin", "--password", pw, "--database", path.join(BASE, "filebrowser.db")]);
       const [states, vers] = await Promise.all([serviceStates(), versions()]);
       const msg = r.code === 0 ? `<span class="ok">✓ Galerie-Passwort gesetzt.</span>`
@@ -594,8 +623,8 @@ const server = http.createServer(async (req, res) => {
     upd.on("close", (c) => { log.write("\n[update exit " + c + "]\n"); log.end(); });
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }).end(
       page("Update", "sys", qTok, `<h2>Update läuft …</h2><p>Dauert Minuten.</p>`
-        + `<meta http-equiv="refresh" content="8;url=/system/update-log?token=${qTok}">`
-        + `<p><a class="btn sec" href="/system/update-log?token=${qTok}">Zum Log</a></p>`));
+        + `<meta http-equiv="refresh" content="8;url=/system/update-log?token=${esc(qTok)}">`
+        + `<p><a class="btn sec" href="/system/update-log?token=${esc(qTok)}">Zum Log</a></p>`));
     return;
   }
   if (req.method === "GET" && u.pathname === "/system/update-log") {
