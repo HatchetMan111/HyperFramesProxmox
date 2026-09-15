@@ -44,6 +44,16 @@ if [ -f /etc/systemd/system/omniroute.service.d/exec.conf ]; then
   sed -i "s/serve --port [0-9]*/serve --port $CUR_OMNI/" /etc/systemd/system/omniroute.service.d/exec.conf
 fi
 sed -i "s/data-port=\"3100\"/data-port=\"$CUR_BRIDGE\"/; s/data-port=\"3101\"/data-port=\"$CUR_GAL\"/; s/data-port=\"20128\"/data-port=\"$CUR_OMNI\"/" "$BASE/portal.html" 2>/dev/null || true
+# Binary-Pfade neu verdrahten (npm-Prefix ist /usr/local oder /usr, je nach Node-Quelle)
+export PATH="/usr/local/bin:$PATH"
+HF_BIN="$(command -v hyperframes || true)"
+[ -n "$HF_BIN" ] || { echo "FEHLER: hyperframes-Binary nicht gefunden"; exit 1; }
+sed -i "s|ExecStart=/usr/local/bin/hyperframes|ExecStart=$HF_BIN|" /etc/systemd/system/hf-studio.service
+sed -i "s|ExecStart=/usr/bin/node|ExecStart=$(command -v node)|" /etc/systemd/system/hf-jobs.service
+sed -i "s|ExecStart=/usr/local/bin/filebrowser|ExecStart=$(command -v filebrowser)|" /etc/systemd/system/hf-gallery.service
+sed -i "s|ExecStart=/usr/bin/socat|ExecStart=$(command -v socat)|" /etc/systemd/system/hf-studio-bridge.service
+sed -i "s|ExecStart=/usr/bin/python3|ExecStart=$(command -v python3)|" /etc/systemd/system/hf-portal.service
+sed -i "s|ExecStart=/usr/local/bin/omniroute|ExecStart=$(command -v omniroute || echo /usr/local/bin/omniroute)|" /etc/systemd/system/omniroute.service
 cp "$BASE/portal.html" "$BASE/portal/index.html"
 chown -R hyperframes:hyperframes "$BASE"
 systemctl daemon-reload

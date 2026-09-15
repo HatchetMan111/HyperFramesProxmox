@@ -277,6 +277,16 @@ sed -i "s/Environment=PORT=20128/Environment=PORT=$PORT_OMNI/" /etc/systemd/syst
 sed -i "s/\"PORT_STUDIO_LAN\":3100/\"PORT_STUDIO_LAN\":$PORT_STUDIO_LAN/; s/:3100\\//:$PORT_STUDIO_LAN\\//g; s/:3101\\//:$PORT_GALLERY\\//g; s/:3120/:$PORT_JOBS/g; s/:20128/:$PORT_OMNI/g" "$BASE/portal.html" 2>/dev/null || true
 sed -i "s/data-port=\"3100\"/data-port=\"$PORT_STUDIO_LAN\"/; s/data-port=\"3101\"/data-port=\"$PORT_GALLERY\"/; s/data-port=\"20128\"/data-port=\"$PORT_OMNI\"/" "$BASE/portal.html" 2>/dev/null || true
 cp "$BASE/portal.html" "$BASE/portal/index.html"
+echo "==> [CT] Binary-Pfade in Units verdrahten (npm-Prefix ist /usr/local oder /usr, je nach Node-Quelle)"
+HF_BIN="$(command -v hyperframes || true)"
+[ -n "$HF_BIN" ] || { echo "FEHLER: hyperframes-Binary nicht gefunden (npm install -g fehlgeschlagen?)"; exit 1; }
+echo "Binaries: hyperframes=$HF_BIN node=$(command -v node) filebrowser=$(command -v filebrowser) socat=$(command -v socat) python3=$(command -v python3)"
+sed -i "s|ExecStart=/usr/local/bin/hyperframes|ExecStart=$HF_BIN|" /etc/systemd/system/hf-studio.service
+sed -i "s|ExecStart=/usr/bin/node|ExecStart=$(command -v node)|" /etc/systemd/system/hf-jobs.service
+sed -i "s|ExecStart=/usr/local/bin/filebrowser|ExecStart=$(command -v filebrowser)|" /etc/systemd/system/hf-gallery.service
+sed -i "s|ExecStart=/usr/bin/socat|ExecStart=$(command -v socat)|" /etc/systemd/system/hf-studio-bridge.service
+sed -i "s|ExecStart=/usr/bin/python3|ExecStart=$(command -v python3)|" /etc/systemd/system/hf-portal.service
+sed -i "s|ExecStart=/usr/local/bin/omniroute|ExecStart=$(command -v omniroute || echo /usr/local/bin/omniroute)|" /etc/systemd/system/omniroute.service
 echo "==> [CT] OmniRoute-Startform erkennen (nur wenn lokal installiert)"
 if command -v omniroute >/dev/null 2>&1; then
   OMNI_BIN="$(command -v omniroute)"
@@ -327,6 +337,12 @@ msg_ok "App-Installation im Container abgeschlossen"
 
 # ---------- Verifikation vom Host (mit Start-Wartezeit: Dienste brauchen bis ~60 s) ----------
 msg_info "Verifiziere Dienste + Web UIs"
+# Sauberer Neustart vor der Prüfung: setzt alle Restart-Zähler zurück, damit
+# Crash-Loops (z. B. 203/EXEC durch falschen Binary-Pfad) per NRestarts auffallen
+# statt im 5s-Prüfraster als "active" durchzurutschen.
+pct exec "$CT_ID" -- systemctl reset-failed >/dev/null 2>&1 || true
+pct exec "$CT_ID" -- systemctl restart hyperframes-suite.target >/dev/null 2>&1 || true
+sleep 10
 # curl gibt per -w IMMER einen Code aus (000 = keine Verbindung) — darum hier
 # kein "|| echo 000" (das würde den Code verdoppeln, z. B. "000000").
 http_code() { # $1 = URL — gibt HTTP-Code aus (200 / 403 / 000 …)
@@ -356,6 +372,13 @@ for svc in $SVCS; do
     sleep 5
   done
   if [ "$ok" = "1" ]; then
+    # Crash-Loop-Test: Dienst läuft, startet aber ständig neu (fällt sonst durchs Raster)
+    nr="$(pct exec "$CT_ID" -- systemctl show "$svc" -p NRestarts --value 2>/dev/null || echo 0)"
+    if [ "${nr:-0}" -gt 3 ]; then
+      msg_error "Service $svc in Crash-Loop ($nr Restarts seit Prüfbeginn — z. B. falscher Binary-Pfad, 203/EXEC)"
+      pct exec "$CT_ID" -- journalctl -u "$svc" -n 20 --no-pager || true
+      exit 1
+    fi
     msg_ok "Service $svc aktiv"
   else
     msg_error "Service $svc nicht aktiv nach 60 s"
